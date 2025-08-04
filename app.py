@@ -23,6 +23,11 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})  # Adjust as needed
 
+import os
+
+print("✅ Current working directory:", os.getcwd())
+print("✅ Files in /app/pdfs:", os.listdir("pdfs"))
+
 # === Document Setup ===
 pdf_filename = os.path.join("pdfs", "GriefBot.pdf")
 loader = PyPDFLoader(pdf_filename)
