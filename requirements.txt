@@ -1,4 +1,5 @@
 python-dotenv
+gunicorn
 flask
 langchain 
 langchain-chroma 
@@ -14,4 +15,3 @@ pdfminer.six
 flask_cors
 networkx
 python-dotenv
-gunicorn
