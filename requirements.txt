@@ -13,3 +13,4 @@ pdfminer.six
 flask_cors
 networkx
 python-dotenv
+gunicorn
