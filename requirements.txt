@@ -1,0 +1,15 @@
+python-dotenv
+flask
+langchain 
+langchain-chroma 
+langchain-community 
+langchain-core 
+langchain-groq 
+langchain-huggingface 
+langchain-text-splitters 
+chromadb 
+pypdf 
+pdfminer.six
+flask_cors
+networkx
+python-dotenv
