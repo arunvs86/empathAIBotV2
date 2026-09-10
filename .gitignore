@@ -1,4 +1,25 @@
-.env
+# python
 __pycache__/
-*.pyc.env
+*.pyc
+
+# secrets
 .env
+.env.*
+
+# environments / builds
+.venv/
+antenv/
+env/
+build/
+dist/
+*.egg-info/
+
+# caches & data
+.cache/
+data/
+home/
+tmp/
+logs/
+
+# macOS
+.DS_Store
