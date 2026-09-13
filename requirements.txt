@@ -10,6 +10,7 @@ groq>=0.31
 flask>=3.0
 flask-cors>=4.0
 python-dotenv>=1.0
+gunicorn>=21.2          # WSGI server used by Azure App Service to run app:app
 
 # Document loading (optional - the bot falls back to a built-in corpus)
 pypdf>=5.0
