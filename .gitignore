@@ -5,6 +5,12 @@ __pycache__/
 # secrets
 .env
 .env.*
+!.env.example
+
+# runtime state & local artifacts
+griefbot_memory.db*
+app.py.v1-backup
+*.zip
 
 # environments / builds
 .venv/

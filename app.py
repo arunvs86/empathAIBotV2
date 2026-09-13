@@ -1,970 +1,2084 @@
-# import os, re, networkx as nx
-# from flask import Flask, request, jsonify
-# from flask_cors import CORS
-# from dotenv import load_dotenv
-# from uuid import uuid4
-
-# # Langchain Imports
-# from langchain.chains import LLMChain, create_retrieval_chain
-# from langchain.chains.combine_documents.stuff import create_stuff_documents_chain
-# from langchain_community.vectorstores import Chroma
-# from langchain_core.chat_history import BaseChatMessageHistory
-# from langchain_community.chat_message_histories import ChatMessageHistory
-# from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
-# from langchain_core.runnables.history import RunnableWithMessageHistory
-# from langchain_huggingface import HuggingFaceEmbeddings
-# from langchain_text_splitters import RecursiveCharacterTextSplitter
-# from langchain_community.document_loaders import PyPDFLoader
-# from langchain_groq import ChatGroq
-# from groq import Groq 
-# load_dotenv()
-
-# from transformers import pipeline
-
-# print("✅ Loading moderation model...")
-# classifier = pipeline("text-classification", model="arun86/hate-offensive-suicidal-bert1")
-
-
-# # === Flask Setup ===
-# app = Flask(__name__)
-# CORS(app, resources={r"/*": {"origins": "*"}})  # Adjust as needed
-
-# import os
-
-# print("✅ Current working directory:", os.getcwd())
-# print("✅ Files in /app/pdfs:", os.listdir("pdfs"))
-
-# # === Document Setup ===
-# pdf_filename = os.path.join("pdfs", "GriefBot.pdf")
-# loader = PyPDFLoader(pdf_filename)
-# documents = loader.load()
-# splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=100)
-# chunks = splitter.split_documents(documents)
-
-# # === Vector Store ===
-# embedding = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-# vectorstore = Chroma.from_documents(chunks, embedding=embedding)
-# retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-
-# # === LLM Setup ===
-# api_key = os.getenv("GROQ")
-# if not api_key:
-#     raise ValueError("Missing GROQ API key")
-# # llm = ChatGroq(groq_api_key=api_key, model_name="Gemma2-9b-It")
-# # llm = ChatGroq(groq_api_key=api_key, model_name="qwen/qwen3-32b")
-# llm = ChatGroq(
-#     groq_api_key=api_key,
-#     model_name="qwen/qwen3-32b",
-#     temperature=0.6,
-#     top_p=0.95
-# )
-
-# # === Knowledge Graph Setup ===
-# KG = nx.DiGraph()
-
-# triple_extraction_prompt = PromptTemplate.from_template(
-#     """Extract all subject-relationship-object triples from the text below.
-
-# Text: "{text}"
-
-# Format each triple like: (subject, relation, object)
-
-# Only return the list of triples. Do not explain.
-
-# Triples:"""
-# )
-# triple_extraction_chain = LLMChain(llm=llm, prompt=triple_extraction_prompt)
-
-# def extract_triples(text):
-#     try:
-#         raw_output = triple_extraction_chain.invoke({"text": text})["text"]
-#         pattern = r"\(\s*['\"]?([\w\s]+?)['\"]?\s*,\s*['\"]?([\w\s]+?)['\"]?\s*,\s*['\"]?([\w\s]+?)['\"]?\s*\)"
-#         matches = re.findall(pattern, raw_output)
-#         return [(s.strip(), r.strip(), o.strip()) for s, r, o in matches]
-#     except Exception as e:
-#         print("⚠️ Triple extraction failed:", e)
-#         return []
-
-# def store_kg(triples):
-#     for s, r, o in triples:
-#         KG.add_edge(s, o, label=r)
-
-# def get_kg_facts(entity=None):
-#     facts = []
-#     for u, v, d in KG.edges(data=True):
-#         if not entity or entity in (u, v):
-#             facts.append(f"{u} {d['label']} {v}")
-#     return "\n".join(facts)
-
-# # === Validator Chain ===
-# validation_prompt = PromptTemplate.from_template(
-#     """You are a validation engine for a grief support chatbot.
-
-# User's message: "{query}"
-
-# Only respond with one of:
-# - "valid"
-# - "nonsensical"
-# - "unrelated"
-# - "illogical"
-# - "offensive"
-# - "harmful"
-
-# Your answer:"""
-# )
-# validator_chain = LLMChain(llm=llm, prompt=validation_prompt)
-
-# # === System Prompt ===
-# system_prompt = (
-#     """
-# Here's how you respond:
-# - Use short, simple, human-sounding sentences.
-# - Acknowledge emotion first.
-# - Offer support or reflection, not lectures.
-# - Ask gentle follow-up questions when needed.
-# - Only include facts from provided context if relevant.
-# - Never guess if you’re unsure — just say so kindly.
-
-# Avoid sounding like a bot or giving long, polished essays.
-
-# Always DEEPLY HUMANIZE YOUR RESPONSES.
-
-# Now continue the conversation naturally. Keep your response in 2-3 lines maximum
-
-# {context}"""
-# )
-
-# qa_prompt = ChatPromptTemplate.from_messages([
-#     ("system", system_prompt),
-#     MessagesPlaceholder(variable_name="chat_history"),
-#     ("human", "{input}"),
-# ])
-
-# question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-# rag_chain = create_retrieval_chain(retriever, question_answer_chain)
-
-# # === Session History ===
-# session_store = {}
-
-# def get_session_history(session_id: str) -> BaseChatMessageHistory:
-#     print("sessionid:", session_id)
-#     if session_id not in session_store:
-#         session_store[session_id] = ChatMessageHistory()
-#     return session_store[session_id]
-
-# conversational_rag_chain = RunnableWithMessageHistory(
-#     rag_chain,
-#     get_session_history,
-#     input_messages_key="input",
-#     history_messages_key="chat_history",
-#     output_messages_key="answer"
-# )
-
-# def build_system_prompt(verdict: str):
-#     print("verdict in prompt build", verdict)
-#     advisory = ""
-#     if verdict in ["illogical", "nonsensical"]:
-#         advisory = (
-#             f"The user's message was flagged as '{verdict}'. "
-#             "If something doesn’t make sense, clarify kindly. Be gentle and make sure their feelings are not hurt\n\n"
-#             "Just make sure you make no errors. You have to clarify if the query doesn't seem logical"
-#             "You have to make sure that you clarify the mistake so that you dont sound stupid"
-#             "{context}"
-#         )
-#         return advisory
-
-#     return advisory + """
-# - You are based in the United Kingdom
-# - Use short, simple, human-sounding sentences.
-# - Acknowledge emotion first.
-# - Offer support or reflection, not lectures.
-# - Ask gentle follow-up questions when needed.
-# - Only include facts from provided context if relevant.
-# - Never guess if you’re unsure — just say so kindly.
-
-# Avoid sounding like a bot or giving long, polished essays.
-
-# Always DEEPLY HUMANIZE YOUR RESPONSES.
-
-# Now continue the conversation naturally. Keep your response in 2-3 lines maximum
-
-# {context}"""
-
-# groq_client = Groq(api_key=os.getenv("GROQ"))
-# print("groq_client",groq_client)
-# def validate_message(query: str) -> str:
-#     print("Coming inside validate message")
-#     response = groq_client.chat.completions.create(
-#         model="qwen/qwen3-32b",
-#         messages=[
-#             {
-#                 "role": "system",
-#                 "content": "You are a validation engine for a grief support chatbot.\n"
-#                            "Only return one of: valid, nonsensical, unrelated, illogical, offensive, harmful."
-#             },
-#             {
-#                 "role": "user",
-#                 "content": f'User message: "{query}"'
-#             }
-#         ],
-#         temperature=0.6,
-#         top_p=0.95
-#     )
-#     print("response of validation", response)
-#     reasoning = getattr(response.choices[0], "reasoning", None)
-#     answer = response.choices[0].message.content.strip().lower()
-
-#     print("🧠 Validator Reasoning:\n", reasoning)
-#     print("✅ Validator Verdict:", answer)
-
-#     raw_answer = answer
-#     cleaned_answer = re.sub(r"<think>.*?</think>", "", raw_answer, flags=re.DOTALL).strip()
-
-#     return cleaned_answer
-
-# def moderate_content(text: str) -> tuple[bool, str | None]:
-
-#     client = Groq(api_key=os.getenv("GROQ"))
-#     response = client.chat.completions.create(
-#         model="meta-llama/Llama-Guard-4-12B",
-#         messages=[
-#             {
-#                 "role": "user",
-#                 "content": text
-#             }
-#         ]
-#     )
-
-#     result = response.choices[0].message.content.strip()
-#     print("🛡️ Moderation result:", repr(result))
-
-#     if result.startswith("safe"):
-#         return True, None
-#     elif result.startswith("unsafe"):
-#         lines = result.splitlines()
-#         if len(lines) > 1:
-#             return False, lines[1].strip()
-#         return False, "unknown"
-#     else:
-#         # Fallback if output is unclear
-#         return False, "unclassified"
-
-# def custom_moderate_content(text: str) -> dict:
-#     result = classifier(text)[0]
-#     label = result["label"].lower()
-#     score = result["score"]
-
-#     is_safe = label in ["neither", "suicidal"]  # allow suicidal content for support
-
-#     return {
-#         "is_safe": is_safe,
-#         "label": label,
-#         "score": round(score, 4),
-#         "original_text": text
-#     }
-
-# def ask_bot(query, session_id="default"):
-#     # Step 1: Validate the message using raw Groq SDK
-#     verdict = validate_message(query)
-#     print("verdict", verdict)
-#     if verdict in ["unrelated", "offensive", "harmful"]:
-#         return "🤖 I'm here to help with grief-related concerns. Could you ask something else?"
-
-#     # Step 2: Triple extraction and KG update
-#     triples = extract_triples(query)
-#     store_kg(triples)
-
-#     # Step 3: Get relevant documents from vector store
-#     docs = retriever.get_relevant_documents(query)
-#     if not docs or sum(len(doc.page_content.strip()) for doc in docs) < 100:
-#         return "🤖 I'm not sure how to answer that based on what I know."
-
-#     # Step 4: Load session history
-#     history = get_session_history(session_id)
-
-#     # Step 5: Dynamically build prompt with verdict
-#     prompt_text = build_system_prompt(verdict)
-#     print("prompt text", prompt_text)
-#     dynamic_qa_prompt = ChatPromptTemplate.from_messages([
-#         ("system", prompt_text),
-#         MessagesPlaceholder(variable_name="chat_history"),
-#         ("human", "{input}"),
-#     ])
-#     question_answer_chain = create_stuff_documents_chain(llm, dynamic_qa_prompt)
-#     rag_chain = create_retrieval_chain(retriever, question_answer_chain)
-
-#     dynamic_conversational_chain = RunnableWithMessageHistory(
-#         rag_chain,
-#         get_session_history,
-#         input_messages_key="input",
-#         history_messages_key="chat_history",
-#         output_messages_key="answer"
-#     )
-
-#     # Step 6: Generate bot response
-#     response = dynamic_conversational_chain.invoke(
-#         {"input": query, "chat_history": history.messages},
-#         config={"configurable": {"session_id": session_id}}
-#     )
-
-#     raw_answer = response["answer"]
-#     cleaned_answer = re.sub(r"<think>.*?</think>", "", raw_answer, flags=re.DOTALL).strip()
-#     return cleaned_answer
-
-
-# # === API Routes ===
-# @app.route("/")
-# def home():
-#     return "GriefBot API is running."
-
-# @app.route("/ask", methods=["POST"])
-# def ask():
-#     data = request.get_json()
-#     query = data.get("question")
-#     print("query:", query)
-#     if not query:
-#         return jsonify({"error": "Missing question"}), 400
-
-#     session_id = data.get("session_id") or str(uuid4())
-
-#     try:
-#         response = ask_bot(query, session_id)
-#         return jsonify({"response": response, "session_id": session_id})
-#     except Exception as e:
-#         return jsonify({"error": str(e)}), 500
-
-# @app.route("/test-cors", methods=["GET"])
-# def test_cors():
-#     return jsonify({"message": "CORS is working!"})
-
-# @app.route("/moderate", methods=["POST"])
-# def moderate():
-#     data = request.get_json()
-#     text = data.get("content")
-#     print("text received", text)
-#     if not text:
-#         return jsonify({"error": "Missing 'text' in request body"}), 400
-
-#     result = custom_moderate_content(text)
-#     return jsonify(result)
-
-# if __name__ == "__main__":
-#     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), debug=True)
-
-
-import os, time, json, logging
+"""
+=============================================================================
+ GriefBot — a grief-support chatbot on LangGraph
+=============================================================================
+
+                              intake
+                                |
+          +---------------------+---------------------+
+          |                     |                     |
+    moderation            validation            crisis_guard      <- concurrent
+          |                     |                     |
+          +---------------------+---------------------+
+                                |
+                              gate          <- waits for all three, then routes
+                                |
+     +-----------+--------------+--------------+
+     |           |              |              |
+crisis_response refuse      offtopic       remember
+     |           |              |              |
+     |           |              |          retrieve
+     |           |              |              |
+     |           |              |         supervisor <---+
+     |           |              |          /   |   \     |
+     |           |              |   emotional coping ... -+
+     |           |              |              |
+     |           |              |          compose <-> critic
+     +-----------+--------------+--------------+----------> END
+
+ SECTIONS
+   1  Setup and configuration
+   2  Rate limiting
+   3  LLM access
+   4  Prompts
+   5  Crisis detection
+   6  Fact extraction (memory)
+   7  Retrieval
+   8  State
+   9  Helpers
+  10  Guard nodes
+  11  Routing
+  12  Memory and retrieval nodes
+  13  Specialists and supervisor
+  14  Compose and critic
+  15  Terminal nodes
+  16  Graph
+  17  Public API
+  18  Web layer
+=============================================================================
+"""
+
+# =============================================================================
+# 1. SETUP AND CONFIGURATION
+# =============================================================================
+from __future__ import annotations
+
+import atexit
+import hashlib
+import hmac
+import json
+import logging
+import math
+import operator
+import os
 import re
-import tempfile
-import requests
+import sqlite3
+import threading
+import time
+import uuid
+from collections import deque
 from pathlib import Path
-from typing import Tuple, Optional, List, Dict
-from uuid import uuid4
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
-import numpy as np
-import networkx as nx
-from flask import Flask, request, jsonify
-from flask_cors import CORS
 from dotenv import load_dotenv
-
-from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_groq import ChatGroq
-from langchain_core.documents import Document
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 from groq import Groq
 
-# ----------------- Env / Basics -----------------
-load_dotenv()
-os.environ.setdefault("PYTHONUNBUFFERED", "1")
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 
-log = logging.getLogger("moderation")
-log.setLevel(logging.INFO)
+load_dotenv(override=True)          # .env wins over a stale shell variable
 
-def on_azure_app_service() -> bool:
-    return bool(os.getenv("WEBSITE_SITE_NAME"))
+HERE = Path(__file__).resolve().parent
 
-def ensure_dir(path: Path) -> str:
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        return str(path)
-    except Exception as e:
-        print(f"⚠️ Could not create {path}: {e}. Falling back to system temp.")
-        t = Path(tempfile.gettempdir()) / "huggingface"
-        t.mkdir(parents=True, exist_ok=True)
-        return str(t)
+log = logging.getLogger("griefbot")
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
+)
 
-# Cache dirs (harmless; we’re not downloading big models)
-if on_azure_app_service():
-    base_cache = Path("/home/data/.cache")
-else:
-    base_cache = Path.cwd() / ".cache"
+client = Groq(api_key=os.getenv("GROQ"))
+
+BIG_MODEL = os.getenv("BIG_MODEL", "openai/gpt-oss-120b")     # writes replies
+SMALL_MODEL = os.getenv("SMALL_MODEL", "openai/gpt-oss-20b")  # classifies
+
+# Guards try these in order. Different models have separate rate-limit buckets,
+# so a throttled small model falls through to the big one.
+GUARD_MODELS = [SMALL_MODEL, BIG_MODEL]
+
+# max_tokens counts in full against Groq's tokens-per-minute budget, not just
+# what the model returns. gpt-oss needs headroom for its reasoning phase, but
+# 1024 per guard burned the free-tier minute budget in a single turn.
+GUARD_MAX_TOKENS = int(os.getenv("GUARD_MAX_TOKENS", "512"))
+REPLY_MAX_TOKENS = int(os.getenv("REPLY_MAX_TOKENS", "500"))
+
+KEEP_MESSAGES = 6        # verbatim transcript sent to the model
+MAX_HOPS = 2             # supervisor delegation ceiling
+MAX_CRITIQUE_ROUNDS = 1  # rewrite ceiling
+REQUEST_TIMEOUT_S = 30
+
+DB_PATH = HERE / "griefbot_memory.db"
+PDF_DIR = HERE / "pdfs"
 
 
-def resolve_hf_cache_dir() -> Path:
-    # Respect explicit env first
-    if os.getenv("HF_HOME"):
-        return Path(os.getenv("HF_HOME"))
-    # Azure App Service has a writable /home
-    if on_azure_app_service():
-        return Path("/home/data/.cache")
-    # Local/dev default
-    return Path.home() / ".cache" / "huggingface"
+# =============================================================================
+# 2. RATE LIMITING
+# =============================================================================
+# Groq's free tier caps tokens per minute. Reacting to 429s works but wastes a
+# round trip and makes latency spiky. A client-side budget is better: we know
+# roughly what each call will cost before we make it, so we can wait a moment
+# instead of being rejected.
 
-cache_dir = resolve_hf_cache_dir()
-try:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-except Exception as e:
-    print(f"⚠️ Could not create {cache_dir}: {e}. Falling back to temp dir.")
-    cache_dir = Path(tempfile.gettempdir()) / "huggingface"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+class TokenBudget:
+    """Sliding-window throttle. Thread-safe because Flask serves each request
+    on its own thread and LangGraph runs parallel nodes in a thread pool."""
 
-os.environ.setdefault("HF_HOME", str(cache_dir))
-os.environ.setdefault("TRANSFORMERS_CACHE", str(cache_dir))
-print("✅ HF cache directory:", cache_dir)
+    def __init__(self, tokens_per_minute: int, window_s: float = 60.0):
+        self.limit = tokens_per_minute
+        self.window = window_s
+        self._events: deque = deque()      # (timestamp, tokens)
+        self._lock = threading.Lock()
 
-_classifier = None
+    def _prune(self, now: float) -> None:
+        while self._events and now - self._events[0][0] > self.window:
+            self._events.popleft()
 
-hf_dir = ensure_dir(base_cache / "huggingface")
-os.environ.setdefault("HF_HOME", hf_dir)
-os.environ.setdefault("TRANSFORMERS_CACHE", hf_dir)
-print("✅ HF cache directory:", hf_dir)
+    def used(self) -> int:
+        with self._lock:
+            self._prune(time.monotonic())
+            return sum(t for _, t in self._events)
 
-# ----------------- Flask -----------------
-app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+    def acquire(self, tokens: int, max_wait_s: float = 30.0) -> None:
+        """Block until there is room in the window, then record the spend."""
+        deadline = time.monotonic() + max_wait_s
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._prune(now)
+                spent = sum(t for _, t in self._events)
+                if spent + tokens <= self.limit or not self._events:
+                    self._events.append((now, tokens))
+                    return
+                oldest = self._events[0][0]
+                wait = max(0.05, self.window - (now - oldest) + 0.05)
+            if time.monotonic() + wait > deadline:
+                # Don't stall a user forever. Let the call through and let the
+                # provider's own 429 handling take over.
+                log.warning("token budget wait exceeded %.0fs, proceeding", max_wait_s)
+                with self._lock:
+                    self._events.append((time.monotonic(), tokens))
+                return
+            log.debug("token budget full, waiting %.1fs", wait)
+            time.sleep(wait)
 
-print("✅ CWD:", os.getcwd())
-PDF_DIR = Path.cwd() / "pdfs"
 
-# ----------------- Globals -----------------
-_groq_client: Optional[Groq] = None
-_KG = nx.DiGraph()
+# Slightly under the real limit, so we throttle before the provider does.
+TPM_LIMIT = int(os.getenv("TPM_LIMIT", "7000"))
+BUDGET = TokenBudget(TPM_LIMIT)
 
-# Chat memory (in-memory per-process; **we rely on the session_id you pass**)
-_session_store: Dict[str, ChatMessageHistory] = {}
 
-# Simple in-memory TF-IDF index (no sklearn/scipy/faiss/chroma)
-_docs: List[Document] = []
-_vocab: Dict[str, int] = {}
-_idf: Optional[np.ndarray] = None
-_doc_matrix: Optional[np.ndarray] = None   # tf-idf dense matrix (n_docs x vocab)
-_token_pattern = re.compile(r"[A-Za-z0-9']+")
+def estimate_tokens(system: str, user: str, max_tokens: int) -> int:
+    """Groq bills 'requested' tokens as prompt + max_tokens, so estimate both.
+    Roughly four characters per token for English."""
+    return (len(system) + len(user)) // 4 + max_tokens
 
-# Model lists (configurable via env)
-DEFAULT_QA_MODELS = [
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
-]
-DEFAULT_VALIDATION_MODELS = [
-    "openai/gpt-oss-20b",
-]
 
-def parse_model_list(env_name: str, default_list: List[str]) -> List[str]:
-    raw = os.getenv(env_name, "")
-    lst = [s.strip() for s in raw.split(",") if s.strip()]
-    return lst or default_list
+# =============================================================================
+# 3. LLM ACCESS
+# =============================================================================
+# Two functions, because the jobs are different:
+#   call()  -> classification. Small model, one isolated question, temperature 0.
+#   ask()   -> writing. Big model, conversation history, some warmth.
 
-def safe_get_text(x) -> str:
-    if isinstance(x, str):
-        return x
-    if isinstance(x, dict):
-        for k in ("answer", "text", "output_text", "content"):
-            if k in x and isinstance(x[k], str):
-                return x[k]
-        # fallback: first stringy value
-        for v in x.values():
-            if isinstance(v, str):
-                return v
-    return str(x)
+RETRY_DELAY_RE = re.compile(r"try again in ([\d.]+)s", re.IGNORECASE)
 
-def tokenize(text: str) -> List[str]:
-    return [t.lower() for t in _token_pattern.findall(text)]
 
-# ----------------- Lazy initializers -----------------
-def get_groq_client() -> Groq:
-    global _groq_client
-    if _groq_client is None:
-        api_key = os.getenv("GROQ")
-        if not api_key:
-            raise ValueError("Missing GROQ API key. Set env var GROQ.")
-        _groq_client = Groq(api_key=api_key)
-        print("✅ Groq client ready")
-    return _groq_client
+def _is_rate_limit(err: Exception) -> bool:
+    s = str(err)
+    return "429" in s or "rate_limit" in s.lower()
 
-def get_pdf_chunks() -> List[Document]:
-    pdf_filename = PDF_DIR / "GriefBot.pdf"
-    splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=100)
 
-    if not pdf_filename.exists():
-        print(f"⚠️ PDF not found at {pdf_filename}. Using fallback content.")
-        text = (
-            "Grief support basics: Acknowledge feelings, avoid fixing, ask gentle questions, "
-            "encourage support networks, and seek professional help if risk is present."
-        )
-        return splitter.split_documents([Document(page_content=text)])
+def _is_auth_error(err: Exception) -> bool:
+    s = str(err)
+    return "401" in s or "invalid_api_key" in s.lower()
 
-    try:
-        loader = PyPDFLoader(str(pdf_filename))
-        documents = loader.load()
-        return splitter.split_documents(documents)
-    except Exception as e:
-        print("⚠️ PDF load error, using fallback doc:", e)
-        return splitter.split_documents([Document(page_content="Grief support: listen first, reflect feelings, keep responses short and warm.")])
 
-def build_tfidf_index():
-    """Pure NumPy TF-IDF index."""
-    global _docs, _vocab, _idf, _doc_matrix
-    if _doc_matrix is not None and _idf is not None:
-        return
+def _retry_after(err: Exception, attempt: int) -> float:
+    """Groq's 429 states exactly how long to wait. Prefer that over guessing."""
+    m = RETRY_DELAY_RE.search(str(err))
+    if m:
+        return min(float(m.group(1)) + 0.25, 15.0)
+    return min(0.5 * (2 ** attempt), 8.0)
 
-    _docs = get_pdf_chunks()
-    texts = [d.page_content for d in _docs]
-    tokenized = [tokenize(t) for t in texts]
 
-    # Build vocab
-    vocab: Dict[str, int] = {}
-    for tokens in tokenized:
-        for t in tokens:
-            if t not in vocab:
-                vocab[t] = len(vocab)
-    _vocab = vocab
-    V = len(vocab)
-    N = len(texts)
-    if N == 0 or V == 0:
-        _idf = np.zeros((0,), dtype=np.float32)
-        _doc_matrix = np.zeros((0, 0), dtype=np.float32)
-        print("⚠️ Empty TF-IDF index")
-        return
-
-    # Term frequencies per doc
-    tf = np.zeros((N, V), dtype=np.float32)
-    df = np.zeros(V, dtype=np.int32)
-
-    for i, tokens in enumerate(tokenized):
-        if not tokens:
-            continue
-        counts: Dict[int, int] = {}
-        for t in tokens:
-            j = vocab[t]
-            counts[j] = counts.get(j, 0) + 1
-        maxc = max(counts.values())
-        for j, c in counts.items():
-            tf[i, j] = c / maxc  # normalized term freq
-        for j in counts:
-            df[j] += 1
-
-    # IDF
-    idf = np.log((N + 1) / (df + 1)) + 1.0  # smoothed
-    _idf = idf.astype(np.float32)
-
-    # TF-IDF
-    mat = tf * _idf
-    norms = np.linalg.norm(mat, axis=1, keepdims=True) + 1e-12
-    mat = mat / norms
-    _doc_matrix = mat.astype(np.float32)
-    print(f"✅ TF-IDF index ready: {N} docs, {V} terms")
-
-def tfidf_vector_for_query(q: str) -> np.ndarray:
-    tokens = tokenize(q)
-    if not tokens or _idf is None or _doc_matrix is None or len(_vocab) == 0:
-        return np.zeros((len(_vocab),), dtype=np.float32)
-    counts: Dict[int, int] = {}
-    for t in tokens:
-        j = _vocab.get(t)
-        if j is not None:
-            counts[j] = counts.get(j, 0) + 1
-    if not counts:
-        return np.zeros((len(_vocab),), dtype=np.float32)
-    maxc = max(counts.values())
-    vec = np.zeros((len(_vocab),), dtype=np.float32)
-    for j, c in counts.items():
-        vec[j] = (c / maxc) * _idf[j]
-    n = np.linalg.norm(vec) + 1e-12
-    return (vec / n).astype(np.float32)
-
-def retrieve_docs(query: str, k: int = 4) -> List[Document]:
-    if _doc_matrix is None:
-        build_tfidf_index()
-    if _doc_matrix.size == 0:
-        return []
-    qv = tfidf_vector_for_query(query)
-    sims = _doc_matrix @ qv  # cosine because rows are normalized
-    topk = np.argsort(-sims)[:k]
-    return [_docs[i] for i in topk.tolist()]
-
-# ----------------- KG / Prompts -----------------
-def extract_triples_with_failover(text: str) -> List[tuple]:
-    try:
-        models = parse_model_list("GROQ_MODELS", DEFAULT_QA_MODELS)
-        prompt = (
-            "Extract all subject-relationship-object triples from the text below.\n\n"
-            f'Text: "{text}"\n\n'
-            "Format each triple like: (subject, relation, object)\n\n"
-            "Only return the list of triples. Do not explain.\n\n"
-            "Triples:"
-        )
-        messages = [{"role": "user", "content": prompt}]
-        content, model_used = groq_chat_with_failover(messages, models, temperature=0, max_tokens=256)
-        pattern = r"\(\s*['\"]?([\w\s]+?)['\"]?\s*,\s*['\"]?([\w\s]+?)['\"]?\s*,\s*['\"]?([\w\s]+?)['\"]?\s*\)"
-        matches = re.findall(pattern, content or "")
-        return [(s.strip(), r.strip(), o.strip()) for s, r, o in matches]
-    except Exception as e:
-        print("⚠️ Triple extraction failed:", e)
-        return []
-
-def store_kg(triples: List[tuple]):
-    for s, r, o in triples:
-        try:
-            _KG.add_edge(s, o, label=r)
-        except Exception as e:
-            print("⚠️ KG store error:", e)
-
-def build_system_prompt(verdict: str):
-    if verdict in ["illogical", "nonsensical"]:
-        return (
-            f"The user's message was flagged as '{verdict}'. "
-            "If something doesn’t make sense, clarify kindly. Be gentle and avoid shaming.\n"
-            "Make no factual errors. If the query seems illogical, briefly clarify the misunderstanding.\n"
-            "{context}"
-        )
-    return """
-- You are based in the United Kingdom
-- Use short, simple, human-sounding sentences.
-- Acknowledge emotion first.
-- Offer support or reflection, not lectures.
-- Ask gentle follow-up questions when needed.
-- Only include facts from provided context if relevant.
-- Never guess if you’re unsure — just say so kindly.
-
-Avoid sounding like a bot or giving long, polished essays.
-
-Always DEEPLY HUMANIZE YOUR RESPONSES.
-
-Now continue the conversation naturally. Keep your response in 2-3 lines maximum
-
-{context}"""
-
-def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    if session_id not in _session_store:
-        _session_store[session_id] = ChatMessageHistory()
-    return _session_store[session_id]
-
-# ----------------- Groq helpers (failover + backoff) -----------------
-RETRY_STATUS_HINTS = ("over capacity", "rate", "timeout", "temporarily", "503", "429")
-
-def groq_chat_with_failover(messages, models: List[str], temperature=0.6, top_p=0.95, max_tokens: Optional[int]=None):
-    client = get_groq_client()
-    last_err = None
-    delay = 1.0
-    for model in models:
-        attempts = 0
-        while attempts < 3:
-            try:
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    timeout=30,
-                )
-                try:
-                    txt = resp.choices[0].message.content
-                except Exception:
-                    txt = getattr(resp.choices[0], "text", "")
-                return (txt or ""), model
-            except Exception as e:
-                msg = str(e).lower()
-                last_err = e
-                transient = any(h in msg for h in RETRY_STATUS_HINTS)
-                print(f"⚠️ Groq error on model '{model}' (attempt {attempts+1}): {e}")
-                if not transient:
-                    break
-                time.sleep(delay)
-                delay = min(delay * 2, 8)
-                attempts += 1
-    raise last_err or RuntimeError("Groq call failed for all models")
-
-# ----------------- Validation + Moderation -----------------
-def validate_message(query: str) -> str:
-    print("🔎 Validating message…")
-    models = parse_model_list("GROQ_VALIDATION_MODELS", parse_model_list("GROQ_MODELS", DEFAULT_VALIDATION_MODELS))
-    messages = [
-        {"role": "system", "content":
-            "You are a validation engine for a grief-support chatbot. "
-            "Classify the user's message into exactly one category and reply with that single word only:\n"
-            "- valid: about grief, loss, bereavement, or emotional support.\n"
-            "- unrelated: a coherent request that is NOT about grief/loss/emotional support "
-            "(e.g. general knowledge, coding, sports, weather, trivia).\n"
-            "- nonsensical: gibberish or not understandable.\n"
-            "- illogical: self-contradictory or logically impossible.\n"
-            "- offensive: hateful, harassing, or abusive.\n"
-            "- harmful: requests or promotes danger (violence, self-harm instructions, etc.).\n"
-            "Respond with only one of: valid, nonsensical, unrelated, illogical, offensive, harmful."},
-        {"role": "user", "content": f'User message: "{query}"'}
-    ]
-    # gpt-oss models spend tokens on an internal reasoning phase before the visible
-    # verdict, so give enough headroom or the content comes back empty.
-    txt, used = groq_chat_with_failover(messages, models, temperature=0.6, top_p=0.95, max_tokens=512)
-    cleaned = re.sub(r"<think>.*?</think>", "", str(txt), flags=re.DOTALL).strip().lower()
-    # Extract the verdict word robustly so extra text can't break the downstream match.
-    labels = ["harmful", "offensive", "nonsensical", "illogical", "unrelated", "valid"]
-    verdict = next((lbl for lbl in labels if re.search(rf"\b{lbl}\b", cleaned)), cleaned)
-    print(f"✅ Validator verdict ({used}): {verdict}  (raw: {cleaned!r})")
-    return verdict
-
-def moderate_with_llamaguard(text: str) -> Tuple[bool, Optional[str]]:
-    models = [os.getenv("GROQ_MODERATION_MODEL", "openai/gpt-oss-safeguard-20b")]
-    # gpt-oss-safeguard follows an explicit policy and returns a verdict we parse below.
-    system_policy = (
-        "You are a content-moderation engine for a grief-support chatbot. "
-        "Decide whether the user's message is SAFE to answer. "
-        "Content is UNSAFE only if it involves hate, harassment, sexual content involving minors, "
-        "instructions for violence or self-harm, or other clearly harmful requests. "
-        "Expressions of grief, sadness, or suicidal feelings seeking support are SAFE. "
-        "Reply with exactly one word on the first line: 'safe' or 'unsafe'. "
-        "If unsafe, add a short reason on the next line."
-    )
-    messages = [
-        {"role": "system", "content": system_policy},
-        {"role": "user", "content": text},
-    ]
-    try:
-        resp, used = groq_chat_with_failover(messages, models, temperature=0, max_tokens=512)
-        res = (resp or "").strip()
-        # Strip any <think>…</think> reasoning some models emit, then look at the verdict.
-        res = re.sub(r"<think>.*?</think>", "", res, flags=re.DOTALL).strip().lower()
-        first_line = res.splitlines()[0].strip() if res else ""
-        if first_line.startswith("safe") or (not first_line.startswith("unsafe") and "unsafe" not in res):
-            return True, None
-        # Unsafe: return the reason (line after the verdict if present, else the whole body).
-        lines = [ln.strip() for ln in res.splitlines() if ln.strip()]
-        reason = lines[1] if len(lines) > 1 else (first_line or "unsafe")
-        return False, reason
-    except Exception as e:
-        print("⚠️ Moderation call failed (allowing request):", e)
-        return True, None
-
-# ----------------- Answering (MANUAL MEMORY) -----------------
-def answer_with_model(model_name: str, query: str, docs: List[Document], history: ChatMessageHistory, verdict: str) -> str:
-    llm = ChatGroq(
-        groq_api_key=os.getenv("GROQ"),
-        model_name=model_name,
-        temperature=0.6,
-        top_p=0.95
-    )
-    prompt_text = build_system_prompt(verdict)
-
-    # Prompt uses history + current user input
-    qa_prompt = ChatPromptTemplate.from_messages([
-        ("system", prompt_text),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{input}"),
-    ])
-
-    # Render the prompt to messages and call LLM directly to avoid wrapper issues
-    rendered = qa_prompt.invoke({
-        "chat_history": history.messages,   # <- THIS injects full prior convo
-        "input": query,
-        "context": docs                     # available to the prompt if you use {context}
-    })
-    # LLM call
-    resp = llm.invoke(rendered.to_messages())
-    text = safe_get_text(getattr(resp, "content", resp))
+def _extract_text(resp) -> str:
+    """gpt-oss models reason before answering. If the budget goes into thinking,
+    `content` is empty and the reasoning lands in a separate field."""
+    msg = resp.choices[0].message
+    text = (msg.content or "").strip()
+    if not text:
+        text = (getattr(msg, "reasoning", None) or "").strip()
     return text
 
 
-def ask_bot(query, session_id="default"):
-    # Moderation (soft-fail)
-    is_safe, reason = moderate_with_llamaguard(query)
-    if not is_safe:
-        return "🙏 I can’t help with that request. If you’re in distress, please consider reaching out to someone you trust or local support."
-
-    verdict = validate_message(query)
-    if verdict in ["unrelated", "offensive", "harmful"]:
-        return "🤖 I’m here to help with grief-related concerns. Could you ask something else?"
-
-    # Get session history
-    history = get_session_history(session_id)
-
-    # Update KG (best-effort)
-    try:
-        store_kg(extract_triples_with_failover(query))
-    except Exception as e:
-        print("⚠️ KG step failed (continuing):", e)
-
-    # Retrieve docs
-    docs = retrieve_docs(query, k=4)
-
-    # Try QA models with failover
-    models = parse_model_list("GROQ_MODELS", DEFAULT_QA_MODELS)
-    last_err = None
-    for m in models:
-        try:
-            # Generate answer with PRIOR history injected
-            ans = answer_with_model(m, query, docs, history, verdict)
-            cleaned = re.sub(r"<think>.*?</think>", "", ans, flags=re.DOTALL).strip()
-
-            # **Persist this turn to memory** so follow-ups (e.g., “how old was she?”) work
-            history.add_user_message(query)
-            history.add_ai_message(cleaned)
-
-            return cleaned
-        except Exception as e:
-            last_err = e
-            print(f"⚠️ QA model failed '{m}': {e}")
-            time.sleep(0.8)
-            continue
-
-    print("❌ All QA models failed:", last_err)
-    return "😞 Our model endpoints are busy right now. Please try again shortly."
-
-
-HF_MODEL_ID = os.getenv("HF_MODEL_ID", "arun86/hate-offensive-suicidal-bert1")
-_classifier = None
-
-def get_classifier():
-    """
-    Load the HF model once, on CPU, with anonymous download.
-    Uses the writable cache dir you already set (HF_HOME).
-    """
-    global _classifier
-    if _classifier is not None:
-        return _classifier
-
-    if AutoTokenizer is None or AutoModelForSequenceClassification is None or pipeline is None:
-        raise RuntimeError("transformers is not available. Check requirements install on Azure.")
-
-    # Force anonymous (token=None) so old/expired tokens can't break downloads
-    tok = AutoTokenizer.from_pretrained(HF_MODEL_ID, token=None)
-    mdl = AutoModelForSequenceClassification.from_pretrained(HF_MODEL_ID, token=None)
-    _classifier = pipeline(
-        "text-classification",
-        model=mdl,
-        tokenizer=tok,
-        device=-1,           # CPU
-        truncation=True
+def _chat(model: str, messages: List[Dict[str, str]], *,
+          temperature: float, max_tokens: int) -> str:
+    prompt_chars = sum(len(m.get("content") or "") for m in messages)
+    BUDGET.acquire(prompt_chars // 4 + max_tokens)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=REQUEST_TIMEOUT_S,
     )
+    return _extract_text(resp)
+
+
+def _with_retry(models: List[str], messages, *, temperature, max_tokens,
+                label: str) -> str:
+    last_err: Optional[Exception] = None
+    for model in models:
+        for attempt in range(3):
+            try:
+                text = _chat(model, messages,
+                             temperature=temperature, max_tokens=max_tokens)
+                record_model_success()
+                return text
+            except Exception as e:                      # noqa: BLE001
+                last_err = e
+                if _is_rate_limit(e):
+                    # A 429 is explicitly transient. Treating it as a failure
+                    # means backpressure silently disables a safety guard.
+                    delay = _retry_after(e, attempt)
+                    log.warning("%s rate limited on %s, waiting %.1fs",
+                                label, model, delay)
+                    time.sleep(delay)
+                    continue
+                if _is_auth_error(e):
+                    break                               # no point retrying
+                log.warning("%s failed on %s: %s", label, model, e)
+                break                                   # try the next model
+    raise last_err or RuntimeError(f"{label}: all models failed")
+
+
+def call(system: str, user: str, max_tokens: int = None) -> str:
+    """One classification question. Deterministic."""
+    return _with_retry(
+        GUARD_MODELS,
+        [{"role": "system", "content": system},
+         {"role": "user", "content": user}],
+        temperature=0,
+        max_tokens=max_tokens or GUARD_MAX_TOKENS,
+        label="call",
+    )
+
+
+def ask(messages: List[Dict[str, str]], system: str = None,
+        max_tokens: int = None) -> str:
+    """Write a reply. Takes conversation history plus a system prompt."""
+    return _with_retry(
+        [BIG_MODEL, SMALL_MODEL],
+        [{"role": "system", "content": system or SUPPORT_SYSTEM}] + list(messages),
+        temperature=0.6,
+        max_tokens=max_tokens or REPLY_MAX_TOKENS,
+        label="ask",
+    )
+
+
+def clean(t: str) -> str:
+    """Strip the <think>...</think> block some models emit."""
+    return re.sub(r"<think>.*?</think>", "", t or "", flags=re.DOTALL).strip()
+
+
+def last_label(text: str, labels: set, default: str) -> str:
+    """Take the LAST matching label in the output.
+
+    These models think out loud, and the thinking mentions every option:
+        "We need to decide if this is unsafe or safe. ... safe"
+    A first-match search returns "unsafe" and refuses a grieving user.
+    The real verdict is always last.
+    """
+    words = re.findall(r"[a-z]+", (text or "").lower())
+    for w in reversed(words):
+        if w in labels:
+            return w
+    return default
+
+
+# --- degraded mode -----------------------------------------------------------
+# A live run with a dead key routed EVERY message to crisis, because the crisis
+# guard failed closed on each exception. Failing closed is right when a check
+# RAN and was ambiguous; it is wrong when the check COULD NOT RUN. And the
+# lexical tier needs no network, so recall survived the outage anyway.
+_FAILURE_STREAK = 0
+DEGRADED_AFTER = 3
+
+
+def record_model_failure(err: Exception) -> bool:
+    global _FAILURE_STREAK
+    _FAILURE_STREAK += 1
+    if _FAILURE_STREAK == DEGRADED_AFTER:
+        log.critical("model tier down after %d failures (%s). "
+                     "Falling back to deterministic checks only.",
+                     DEGRADED_AFTER, type(err).__name__)
+    return _FAILURE_STREAK >= DEGRADED_AFTER
+
+
+def record_model_success() -> None:
+    global _FAILURE_STREAK
+    if _FAILURE_STREAK >= DEGRADED_AFTER:
+        log.info("model tier recovered")
+    _FAILURE_STREAK = 0
+
+
+def is_degraded() -> bool:
+    return _FAILURE_STREAK >= DEGRADED_AFTER
+
+
+# =============================================================================
+# 4. PROMPTS
+# =============================================================================
+# Structure: stable identity first (providers cache on prefix match), then
+# retrieved context, then memory, then the turn-specific instruction.
+
+SPECIALIST_BASE = """You are part of a grief-support service for a UK user.
+
+Anything you are told about this person's loss was told to you BY THEM, in this
+conversation. It is their own information. Answer questions about it directly
+and never refuse to repeat something they told you themselves.
+
+Do not diagnose, and do not give medical advice.
+
+NEVER write any of these:
+- "I'm so sorry for your loss", or any formulaic opening apology
+- "I can only imagine", "that must be so hard", "it must feel overwhelming",
+  or anything else claiming to know how they feel
+- advice, suggestions or services the person did not ask for
+- "time heals", "a better place", "at least...", "stay strong", "be strong"
+- "she's watching over you" or anything about an afterlife they did not raise
+
+Instead of guessing at their feelings, reflect what they actually said, or just
+be present: "Three weeks is so recent." "That sounds heavy."
+"""
+
+SUPPORT_SYSTEM = SPECIALIST_BASE + """
+Short, warm, human sentences. No lists, no headings.
+Reply in two or three sentences.
+"""
+
+EMOTIONAL_PROMPT = SPECIALIST_BASE + """
+You are the emotional-support specialist.
+
+Two or three sentences acknowledging what this person is carrying. No advice,
+no logistics, no services. Reflect, do not fix.
+
+{pacing}
+
+What we remember about them:
+{facts}
+
+Background you may draw on (do not quote or cite it):
+{context}
+"""
+
+COPING_PROMPT = SPECIALIST_BASE + """
+You are the coping-and-wellbeing specialist. The person has ASKED for
+suggestions, so giving them is right.
+
+Offer two or three concrete, gentle things many bereaved people find help.
+Ordinary ground: sleep and eating routines, getting outside, keeping something
+of theirs close, writing to them, telling one person how you actually are,
+letting the waves come rather than fighting them, care with alcohol, planning
+gently for hard dates.
+
+Rules:
+- Suggest, never instruct. "Some people find..." not "You should..."
+- Say plainly there is no correct way and no timetable.
+- No stages of grief. No "closure". No promise it improves by a date.
+- If they say they are not coping at all, a GP or bereavement counsellor is a
+  reasonable next step - nothing stronger.
+- Prose, not a numbered list. Four or five sentences.
+
+What we remember about them:
+{facts}
+
+Background you may draw on:
+{context}
+"""
+
+PRACTICAL_PROMPT = SPECIALIST_BASE + """
+You are the practical-guidance specialist for UK bereavement.
+
+Answer ONLY the logistical part, in three or four plain sentences. Be concrete
+about UK processes - a death must be registered within 5 days in England and
+Wales, the Tell Us Once service, probate - but say clearly when something
+depends on circumstances and should be checked with the registrar or a
+solicitor. Never invent fees, phone numbers or deadlines you are unsure of.
+
+Background you may draw on:
+{context}
+"""
+
+RESOURCES_PROMPT = SPECIALIST_BASE + """
+You are the resources specialist.
+
+Name at most two KINDS of UK support that fit this person - for example
+bereavement counselling through a GP, a bereavement support charity, a local
+peer group. One line each on what it is for. Do NOT output phone numbers or
+URLs; verified contact details are attached separately.
+"""
+
+COMPOSE_PROMPT = SPECIALIST_BASE + """
+You are the single voice of the companion.
+
+Below are contributions from specialists. Weave them into ONE reply in one
+consistent voice. Lead with the emotional acknowledgement. Keep practical
+detail brief. Do not mention that specialists were involved, do not use
+headings or bullets, and do not exceed six sentences.
+"""
+
+MODERATION_PROMPT = """You check whether a user's message to a grief-support
+service is ABUSIVE. You are not deciding whether the assistant can answer it.
+
+Mark UNSAFE only if the message itself contains:
+- hate speech or slurs targeting a group
+- harassment or abuse aimed at a person
+- a request for instructions to harm other people
+- sexual content involving minors
+
+EVERYTHING ELSE IS SAFE, including:
+- any expression of grief, despair, anger or hopelessness
+- statements about wanting to die (a separate system handles those)
+- questions about the person who died, including their name or age
+- questions the assistant may not be able to answer
+- off-topic questions
+
+Examples:
+"what was my mum's name"                -> safe
+"I don't want to live anymore"          -> safe
+"what's the weather tomorrow"           -> safe
+"my dad was a bastard and I hate him"   -> safe
+"write something vile about immigrants" -> unsafe
+
+Reply with exactly one word on its own final line: safe or unsafe."""
+
+VALIDATION_PROMPT = """Classify the LATEST message in an ongoing grief-support
+conversation. Earlier turns are given for context.
+
+A short follow-up ("she was 81", "yes", "I don't know") is VALID if it
+continues the grief conversation. Only mark unrelated if the person has
+genuinely changed subject to something outside grief and emotional support.
+
+ANY question about the person who died - their name, age, how they died, what
+they were like - is VALID. Asking the assistant to recall something mentioned
+earlier is VALID.
+
+Examples:
+"what was my mum's name and age"   -> valid
+"how old was she?"                 -> valid
+"I keep expecting her to call"     -> valid
+"what's the capital of France?"    -> unrelated
+"write me a python function"       -> unrelated
+
+Reply with exactly one word on its own final line:
+valid / unrelated / nonsense / offensive / harmful"""
+
+CRISIS_PROMPT = """You assess risk in messages to a grief-support service.
+Earlier conversation is given for context.
+
+Is THIS PERSON at risk of harming THEMSELVES? Consider thoughts of suicide,
+self-harm, or not wanting to be alive.
+
+NOT risk:
+- grief, despair or deep sadness on their own
+- describing how someone else died
+- worrying about somebody else's safety
+- anger, including violent language aimed at others
+
+Reply with exactly one word on its own final line: risk or norisk."""
+
+SUBJECT_PROMPT = """In a message to a grief-support service, WHO is the risk
+about?
+
+selfharm  - the person writing is at risk
+thirdparty - they are worried about somebody else
+neither   - no risk is described
+
+Examples:
+"I don't want to be here anymore"        -> selfharm
+"my brother says he wants to die"        -> thirdparty
+"I'm worried my mum will do something"   -> thirdparty
+"my dad took his own life last year"     -> neither
+
+Reply with exactly one word on its own final line."""
+
+CRISIS_SYSTEM = SPECIALIST_BASE + """
+IMPORTANT: this person may be at risk of harming themselves.
+
+- Take what they said seriously. Do not minimise it, do not sound alarmed.
+- Do not try to talk them out of the feeling. Do not problem-solve.
+- Make clear they are not a burden for saying it.
+- Gently encourage them to talk to a real person tonight.
+- Do NOT include any phone numbers or service names.
+- Ask at most one question.
+
+Write three or four sentences. Warmth matters more than brevity here.
+
+What we remember about them:
+{facts}
+"""
+
+THIRDPARTY_SYSTEM = SPECIALIST_BASE + """
+IMPORTANT: this person is worried about SOMEONE ELSE who may be at risk.
+
+Address THEM, not the person they are worried about. They are frightened and
+carrying something heavy.
+
+- Acknowledge how hard it is to be the one who notices.
+- Say plainly that asking someone directly whether they are thinking of suicide
+  does not plant the idea - it is one of the most useful things they can do.
+- Encourage them to stay alongside rather than fix it.
+- Remind them they are allowed to get support for themselves too.
+- Do NOT include phone numbers; they are attached separately.
+
+Write four or five sentences.
+"""
+
+CRITIC_PROMPT = """You review DRAFT REPLIES from a grief-support companion
+before they are sent.
+
+You are shown the user's message and the draft. Judge the draft only. Do not
+answer it, do not refuse it, and do not comment on whether the information in
+it should be shared - it is the user's own information.
+
+Be proportionate. A reply that is warm, short, and does not claim to know how
+they feel should PASS. Only fail it for a real problem, not for style you would
+have written differently.
+
+IMPORTANT: if the user ASKED for tips, advice or ways to cope, advice in the
+draft is correct and must NOT be failed for that reason.
+
+FAIL only if the draft:
+- gives advice the user did not ask for
+- uses a platitude: "time heals", "a better place", "at least...", "stay strong"
+- claims to know how they feel
+- rushes them toward acceptance, closure or moving on
+- exceeds six sentences
+- asks more than one question
+- states a fact about their loss that was not given to it
+- opens with "I'm sorry for your loss" as a formula
+
+End your response with exactly one word on its own final line: pass or fail.
+If fail, put one short sentence before it saying what to change."""
+
+EXTRACT_PROMPT = """Extract durable facts from a message to a grief-support
+service. Return ONLY a JSON object.
+
+Keys (omit any key you have no explicit evidence for - never guess):
+  deceased_name    the NAME of the person who died. A first name is enough.
+  relationship     their relation to the user (mother, wife, friend, dog)
+  age              age at death
+  cause            cause of death
+  time_since_loss  how long ago
+  key_dates        funeral, birthday or anniversary dates mentioned
+  user_name        the user's own name
+  support          people or services they say they have
+  helps            things they say help them
+
+Pay particular attention to NAMES. "I lost my wife Priya" means
+deceased_name is "Priya" and relationship is "wife". "My mum Margaret died"
+means deceased_name is "Margaret" and relationship is "mother".
+
+If there are no new facts, return {}."""
+
+# Contact details live HERE, in the repo. A model that invents a plausible
+# helpline number for someone in crisis at 2am is the worst failure this
+# product has.
+HELPLINES = """
+
+If things get heavier tonight, these people are there right now:
+- Samaritans - 116 123 (free, 24/7)
+- Shout - text SHOUT to 85258
+- Cruse Bereavement Support - 0808 808 1677
+If you are in immediate danger, please call 999."""
+
+THIRDPARTY_HELPLINES = """
+
+These are for you as much as for them:
+- Samaritans - 116 123 (free, 24/7, and they take calls from people worried
+  about someone else)
+- Papyrus HOPELINE247 - 0800 068 4141 (if the person you are worried about is
+  under 35)
+- If there is immediate danger, call 999."""
+
+
+# =============================================================================
+# 5. CRISIS DETECTION
+# =============================================================================
+# Three tiers, cheapest first, combined with OR:
+#   0  lexical tripwire   ~0ms, no network
+#   1  subject classifier (is the risk about them, or someone else?)
+#   2  LLM risk assessment
+#
+# OR, not AND. We accept false alarms so we never miss a real one. Showing a
+# helpline to someone who did not need it is an awkward moment. Missing someone
+# who did is unrecoverable. Unequal costs, unequal thresholds.
+
+CRISIS_WORDS = re.compile(
+    r"\bkill(?:ing)? myself\b"
+    r"|\bend(?:ing)? (?:my life|it all|things|my own life)\b"
+    r"|\btak(?:e|ing) my own life\b"
+    r"|\bdon'?t want to (?:live|be here|go on|carry on|exist|wake up)\b"
+    r"|\bwant(?:s|ing)? to (?:die|disappear|not exist|not be here)\b"
+    r"|\bbetter off (?:dead|without me)\b"
+    r"|\b(?:no|what'?s the|there'?s no) (?:point|reason)\b[^.?!]{0,25}"
+    r"\b(?:living|life|go(?:ing)? on|carry(?:ing)? on|being here)\b"
+    r"|\bsuicid(?:e|al)\b"
+    r"|\bself[- ]harm(?:ing|ed)?\b"
+    r"|\bhurt(?:ing)? myself\b"
+    r"|\bcut(?:ting)? myself\b"
+    r"|\boverdos(?:e|ing)\b"
+    r"|\bcan'?t (?:go on|carry on|do this any ?more|keep going)\b"
+    r"|\bwish(?:ed)? I (?:was|were) (?:dead|gone|not here)\b"
+    r"|\bnot (?:be|being) (?:around|here) any ?more\b",
+    re.IGNORECASE,
+)
+
+# The counterweight. Without it, "this grief is killing me" triggers - and a bot
+# that shows a suicide helpline whenever someone says they're tired teaches
+# people to ignore it, which is its own safety failure.
+IDIOMS = re.compile(
+    r"\bkilling me\b|\bdying to (?:know|see|hear|meet)\b"
+    r"|\bdied (?:of|from) (?:laughter|embarrassment)\b",
+    re.IGNORECASE,
+)
+
+# These always win, whatever idiom surrounds them.
+UNAMBIGUOUS = re.compile(
+    r"\bkill(?:ing)? myself\b|\bsuicid(?:e|al)\b|\bend(?:ing)? my (?:own )?life\b"
+    r"|\btak(?:e|ing) my own life\b|\bhurt(?:ing)? myself\b|\bself[- ]harm",
+    re.IGNORECASE,
+)
+
+# Someone else is the subject. "my brother wants to die" is a different problem
+# from "I want to die", and the reply has to address a different person.
+THIRD_PARTY = re.compile(
+    r"\b(my|his|her|their|a)\s+(mum|mom|mother|dad|father|wife|husband|partner|"
+    r"son|daughter|brother|sister|friend|mate|colleague|nan|gran|grandad|"
+    r"child|kid|boy|girl|neighbour|neighbor)\b[^.?!]{0,40}"
+    r"\b(wants? to die|wants? to end|said|says|told me|might|is going to|"
+    r"talking about|threatening)\b"
+    r"|\b(?:i'?m |i am )?(?:worried|scared|frightened) (?:about|for) "
+    r"(?:my|his|her|their|him|her|them)\b",
+    re.IGNORECASE,
+)
+
+
+def lexical_crisis(text: str) -> bool:
+    """High-recall tripwire. Unambiguous intent bypasses idiom suppression
+    entirely, so no idiom list can ever mask a clear disclosure."""
+    t = text or ""
+    if UNAMBIGUOUS.search(t):
+        return True
+    if not CRISIS_WORDS.search(t):
+        return False
+    return not IDIOMS.search(t)
+
+
+# Reflexive language is inherently first-person: "kill myself" can only be
+# about the speaker. The ambiguous phrases ("can't go on", "wants to die") can
+# describe anyone, which is why subject resolution has to be separate from
+# risk detection.
+FIRST_PERSON_RISK = re.compile(
+    r"\bmyself\b"
+    r"|\bi\b[^.?!]{0,30}\b(?:want|don'?t want|can'?t go on|can'?t carry on|"
+    r"wish i|am done|give up)\b"
+    r"|\b(?:i'?m|i am)\b[^.?!]{0,30}\b(?:done|finished|giving up)\b",
+    re.IGNORECASE,
+)
+
+
+def lexical_third_party(text: str) -> bool:
+    return bool(THIRD_PARTY.search(text or ""))
+
+
+def resolve_subject(text: str) -> str:
+    """Who is the risk about? Returns selfharm | thirdparty | neither.
+
+    Without this, "my brother says he wants to die" trips the crisis detector
+    and then the reply is addressed to the wrong person - it tells someone
+    frightened about their brother that THEY are not a burden.
+    """
+    t = text or ""
+    # Reflexive intent always wins, even alongside worry about someone else.
+    if UNAMBIGUOUS.search(t) or FIRST_PERSON_RISK.search(t):
+        return "selfharm"
+    if THIRD_PARTY.search(t):
+        return "thirdparty"
+    if CRISIS_WORDS.search(t):
+        return "selfharm"
+    return "neither"
+
+
+# =============================================================================
+# 6. FACT EXTRACTION (memory)
+# =============================================================================
+# The original bot extracted open-ended triples on every turn into a knowledge
+# graph that was never read. Every message paid latency, tokens and a failure
+# surface for data nobody queried.
+#
+# This version: a closed schema, extracted conditionally, and actually read back
+# into the prompt. Memory you never read is not memory.
+
+_NUM = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|few)"
+
+FACT_HINTS = re.compile(
+    r"\b(my|his|her|their|our)\s+(mum|mom|mother|dad|father|wife|husband|"
+    r"partner|son|daughter|brother|sister|nan|nana|gran|grandma|grandad|"
+    r"grandmother|grandfather|friend|dog|cat|pet|baby|child)\b"
+    r"|\b(?:called|named)\s+[A-Z]\w+"
+    r"|\bwas\s+\d{1,3}\b|\b\d{1,3}\s*(?:years?\s*old|yo)\b"
+    r"|\b(died|passed away|passed|lost|funeral|cremation|burial|cancer|stroke|"
+    r"heart attack|accident|suicide|overdose|illness)\b"
+    r"|\b(last|this)\s+(week|month|year|spring|summer|autumn|winter|christmas)\b"
+    rf"|\b{_NUM}\s*(?:days?|weeks?|months?|years?)\s+ago\b"
+    r"|\bmy name is\b|\bi'?m\s+[A-Z]\w+",
+    re.IGNORECASE,
+)
+
+# A capitalised word right after a relationship term is almost always the name.
+# The model misses these sometimes; this is a deterministic backstop.
+# Scoped (?i:...) so the prefix matches "My nan" as well as "my nan", while the
+# NAME group still requires a capital. A blanket re.IGNORECASE here would match
+# "my mum died" and record "died" as her name.
+NAME_AFTER_RELATION = re.compile(
+    r"\b(?i:my|our)\s+(?i:(mum|mom|mother|dad|father|wife|husband|partner|son|"
+    r"daughter|brother|sister|nan|nana|gran|grandma|grandad|grandmother|"
+    r"grandfather|friend|dog|cat))\s*,?\s+([A-Z][a-z]{1,20})\b"
+)
+NAME_AFTER_CALLED = re.compile(r"\b(?i:called|named)\s+([A-Z][a-z]{1,20})\b")
+
+RELATION_CANON = {
+    "mum": "mother", "mom": "mother", "mother": "mother",
+    "dad": "father", "father": "father",
+    "wife": "wife", "husband": "husband", "partner": "partner",
+    "son": "son", "daughter": "daughter",
+    "brother": "brother", "sister": "sister",
+    "nan": "grandmother", "nana": "grandmother", "gran": "grandmother",
+    "grandma": "grandmother", "grandmother": "grandmother",
+    "grandad": "grandfather", "grandfather": "grandfather",
+    "friend": "friend", "dog": "dog", "cat": "cat",
+}
+
+FACT_KEYS = {"deceased_name", "relationship", "age", "cause", "time_since_loss",
+             "key_dates", "user_name", "support", "helps"}
+
+PRETTY = {"deceased_name": "Who died", "relationship": "Their relationship to the user",
+          "age": "Age at death", "cause": "Cause of death",
+          "time_since_loss": "Time since the loss", "key_dates": "Important dates",
+          "user_name": "User's name", "support": "Support around them",
+          "helps": "What helps them"}
+
+# Words the model sometimes returns as a "name" that plainly aren't.
+NOT_NAMES = {"mum", "mom", "mother", "dad", "father", "wife", "husband",
+             "partner", "unknown", "none", "n/a", "na", "null", "her", "him",
+             "she", "he", "they", "nan"}
+
+
+def might_have_facts(text: str) -> bool:
+    """Cheap pre-filter. Most messages carry no new facts ('yeah', 'it's just
+    hard'), and paying a model to confirm that is waste. Skips roughly 60% of
+    extraction calls for the cost of one regex."""
+    return bool(FACT_HINTS.search(text or ""))
+
+
+def lexical_facts(text: str) -> Dict[str, str]:
+    """Deterministic backstop for the field the model most often drops.
+
+    A live run showed 'I lost my wife Priya in the spring' extracting the
+    timeframe but NOT the name - the single most important field in the whole
+    schema. Same principle as the crisis tier: where being wrong is costly, put
+    a plain rule next to the model.
+    """
+    out: Dict[str, str] = {}
+    t = text or ""
+
+    m = NAME_AFTER_RELATION.search(t)
+    if m:
+        rel, name = m.group(1).lower(), m.group(2)
+        if name.lower() not in NOT_NAMES:
+            out["deceased_name"] = name
+            out["relationship"] = RELATION_CANON.get(rel, rel)
+    else:
+        m2 = NAME_AFTER_CALLED.search(t)
+        if m2 and m2.group(1).lower() not in NOT_NAMES:
+            out["deceased_name"] = m2.group(1)
+
+    if "relationship" not in out:
+        for word, canon in RELATION_CANON.items():
+            if re.search(rf"\b(?:my|our)\s+{word}\b", t, re.IGNORECASE):
+                out["relationship"] = canon
+                break
+
+    m3 = re.search(r"\b(?:was|aged)\s+(\d{1,3})\b|\b(\d{1,3})\s*years?\s*old\b",
+                   t, re.IGNORECASE)
+    if m3:
+        age = m3.group(1) or m3.group(2)
+        if 0 < int(age) < 120:
+            out["age"] = age
+    return out
+
+
+def parse_json_object(raw: str) -> dict:
+    """Models wrap JSON in prose or code fences. Dig the object out."""
+    body = re.sub(r"^```(?:json)?|```$", "", clean(raw), flags=re.MULTILINE).strip()
+    match = re.search(r"\{.*\}", body, re.DOTALL)
+    if not match:
+        return {}
     try:
-        print("HF id2label:", mdl.config.id2label)
-    except Exception:
-        pass
-    return _classifier
+        parsed = json.loads(match.group(0))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:                                   # noqa: BLE001
+        return {}
 
-def _normalize_label(raw_label: str, id2label: Optional[Dict]=None) -> str:
+
+def sanitise_facts(raw: dict) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for k, v in (raw or {}).items():
+        if k not in FACT_KEYS:
+            continue
+        if v in (None, "", [], {}):
+            continue
+        s = str(v).strip()
+        if s.lower() in {"unknown", "n/a", "na", "null", "none", "not mentioned"}:
+            continue
+        if k == "deceased_name" and (s.lower() in NOT_NAMES or len(s) > 40):
+            continue
+        if k == "age":
+            digits = re.search(r"\d{1,3}", s)
+            if not digits or not (0 < int(digits.group()) < 120):
+                continue
+            s = digits.group()
+        out[k] = s
+    return out
+
+
+def format_facts(facts: Dict[str, Any]) -> str:
+    """Render memory for the prompt. THIS is the line the original bot was
+    missing - it wrote to a knowledge graph and never read it back."""
+    if not facts:
+        return "(nothing remembered yet)"
+    return "\n".join(f"- {PRETTY.get(k, k)}: {v}" for k, v in facts.items() if v)
+
+
+# =============================================================================
+# 7. RETRIEVAL
+# =============================================================================
+# The rebuild dropped the original bot's document search, so it was answering
+# purely from the model. This restores grounding.
+#
+# BM25 (keyword) + optional dense vectors (semantic), fused with Reciprocal
+# Rank Fusion. RRF uses RANK, not score: BM25 scores are unbounded and
+# corpus-dependent while cosine sits in a fixed range, so they are not
+# comparable and cannot simply be averaged.
+
+_TOKEN_RE = re.compile(r"[A-Za-z0-9']+")
+_STOP = {"the", "a", "an", "and", "or", "of", "to", "in", "is", "it", "that",
+         "this", "for", "on", "with", "as", "was", "were", "be", "been", "are",
+         "i", "you", "my", "your", "at", "by", "from", "but", "not", "can"}
+
+
+def tokenize(text: str) -> List[str]:
+    return [t for t in (w.lower() for w in _TOKEN_RE.findall(text or ""))
+            if t not in _STOP]
+
+
+class BM25:
+    """Okapi BM25.
+
+    k1 controls term-frequency saturation - the 10th occurrence of a word adds
+    far less than the 2nd. b controls length normalisation. 1.5 / 0.75 are the
+    standard defaults, and the ones Azure AI Search uses.
+
+    This is why BM25 beats plain TF-IDF, which has neither.
     """
-    Map model outputs to exactly: 'neither' | 'offensive' | 'hate' | 'suicidal'
-    Handles LABEL_i, friendly strings, and your repo's 'hate_speech'.
+
+    def __init__(self, chunks: List[str], k1: float = 1.5, b: float = 0.75):
+        self.k1, self.b = k1, b
+        self.corpus = [tokenize(c) for c in chunks]
+        self.N = len(self.corpus)
+        self.doc_len = [len(c) for c in self.corpus]
+        self.avgdl = (sum(self.doc_len) / self.N) if self.N else 0.0
+        df: Dict[str, int] = {}
+        self.tf: List[Dict[str, int]] = []
+        for toks in self.corpus:
+            counts: Dict[str, int] = {}
+            for t in toks:
+                counts[t] = counts.get(t, 0) + 1
+            self.tf.append(counts)
+            for t in counts:
+                df[t] = df.get(t, 0) + 1
+        self.idf = {t: math.log(1 + (self.N - n + 0.5) / (n + 0.5))
+                    for t, n in df.items()}
+
+    def search(self, query: str, k: int = 12) -> List[tuple]:
+        q = tokenize(query)
+        if not q or not self.N:
+            return []
+        scores = [0.0] * self.N
+        for term in q:
+            idf = self.idf.get(term)
+            if idf is None:
+                continue
+            for i, counts in enumerate(self.tf):
+                f = counts.get(term, 0)
+                if not f:
+                    continue
+                denom = f + self.k1 * (
+                    1 - self.b + self.b * self.doc_len[i] / (self.avgdl or 1))
+                scores[i] += idf * (f * (self.k1 + 1)) / denom
+        ranked = sorted(range(self.N), key=lambda i: -scores[i])[:k]
+        return [(i, scores[i]) for i in ranked if scores[i] > 0]
+
+
+class DenseIndex:
+    """Sentence-transformer embeddings. Optional: if the package is missing we
+    degrade to keyword-only rather than failing. Graceful degradation of a
+    retrieval tier is a feature, not a compromise."""
+
+    def __init__(self, chunks: List[str]):
+        self.available = False
+        self._model = None
+        self._matrix = None
+        try:
+            import numpy as np
+            from sentence_transformers import SentenceTransformer
+            self._np = np
+            self._model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+            self._matrix = np.asarray(
+                self._model.encode(chunks, normalize_embeddings=True),
+                dtype="float32")
+            self.available = True
+            log.info("dense index ready: %s vectors", self._matrix.shape[0])
+        except Exception as e:                          # noqa: BLE001
+            log.info("dense retrieval unavailable (%s) - keyword-only", type(e).__name__)
+
+    def search(self, query: str, k: int = 12) -> List[tuple]:
+        if not self.available:
+            return []
+        qv = self._model.encode([query], normalize_embeddings=True)[0]
+        sims = self._matrix @ self._np.asarray(qv, dtype="float32")
+        order = self._np.argsort(-sims)[:k]
+        return [(int(i), float(sims[i])) for i in order]
+
+
+def reciprocal_rank_fusion(rankings, k_const: int = 60, top_k: int = 3):
+    """score(d) = sum over lists of 1 / (k + rank(d)).  k = 60 is the value from
+    the original paper and the Azure AI Search default."""
+    fused: Dict[int, float] = {}
+    for ranking in rankings:
+        for rank, (idx, _score) in enumerate(ranking, start=1):
+            fused[idx] = fused.get(idx, 0.0) + 1.0 / (k_const + rank)
+    return sorted(fused.items(), key=lambda kv: -kv[1])[:top_k]
+
+
+FALLBACK_CORPUS = """
+Grief has no fixed timeline and no correct order. Waves of sadness can arrive
+long after the loss, often triggered by ordinary things: a song, a smell, an
+empty chair at a table. There is no stage you are supposed to have reached.
+
+When supporting someone who is grieving, listening matters more than fixing.
+Acknowledge the feeling before offering anything else. Avoid phrases that
+minimise the loss, such as saying it was for the best or that they should be
+over it by now.
+
+Anniversaries, birthdays and holidays are commonly the hardest days. Planning
+gently for them in advance can help - deciding in advance what you will do, and
+giving yourself permission to change your mind on the day.
+
+Grief affects sleep, appetite and concentration. These physical effects are
+normal. If they persist and interfere with daily life, support from a GP or a
+bereavement counsellor is appropriate.
+
+Children grieve differently from adults, often in short bursts, moving between
+distress and play. This is normal and is not a sign they are unaffected. Use
+plain words: "died", not "passed away" or "lost", which children take literally.
+
+Sorting belongings has no deadline. Many people find it easier to keep one or
+two things that carry the person's presence, and to do the rest slowly, with
+someone else in the house.
+
+Bereavement by suicide carries additional weight: stigma, guilt, and repeated
+unanswerable questions about why. Support specifically for this exists and is
+different from general bereavement support.
+
+Registering a death in England and Wales must normally happen within five days.
+The Tell Us Once service lets you report a death to most government departments
+in one go. Probate may be needed before an estate can be distributed.
+"""
+
+
+def chunk_text(text: str, size: int = 900, overlap: int = 150) -> List[str]:
+    """Paragraph-aware chunking.
+
+    Character-count splitting cuts sentences and pronouns lose their referents,
+    which makes a passage useless on its own. The original bot used 400/100,
+    far too small for prose. 900/150 keeps a coherent thought together.
     """
-    lab = (raw_label or "").strip().lower()
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    chunks, current = [], ""
+    for p in paras:
+        if len(current) + len(p) + 2 <= size:
+            current = f"{current}\n\n{p}" if current else p
+        else:
+            if current:
+                chunks.append(current)
+                tail = current[-overlap:] if overlap else ""
+                current = f"{tail}\n\n{p}" if tail else p
+            else:
+                chunks.append(p[:size])
+                current = p[size - overlap:]
+    if current:
+        chunks.append(current)
+    return [c for c in chunks if len(c.strip()) > 40]
 
-    # LABEL_i -> id2label if available
-    if lab.startswith("label_") and lab[6:].isdigit():
-        idx = int(lab[6:])
-        mapped = None
-        if isinstance(id2label, dict):
-            mapped = id2label.get(idx) or id2label.get(str(idx))
-        lab = (str(mapped) if mapped is not None else lab).lower()
 
-    # normalize common variants
-    table = {
-        "hate_speech": "hate",
-        "neutral": "neither",
-        "safe": "neither",
+def load_corpus() -> List[str]:
+    texts: List[str] = []
+    pdfs = sorted(PDF_DIR.glob("*.pdf")) if PDF_DIR.exists() else []
+    for pdf in pdfs:
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(str(pdf))
+            body = "\n\n".join((page.extract_text() or "") for page in reader.pages)
+            if body.strip():
+                texts.append(body)
+                log.info("loaded corpus: %s (%d pages)", pdf.name, len(reader.pages))
+        except Exception as e:                          # noqa: BLE001
+            log.warning("could not read %s: %s", pdf.name, e)
+    if not texts:
+        log.info("no PDFs found in %s - using built-in corpus", PDF_DIR)
+        texts = [FALLBACK_CORPUS]
+    chunks: List[str] = []
+    for t in texts:
+        chunks.extend(chunk_text(t))
+    log.info("corpus indexed: %d chunks", len(chunks))
+    return chunks
+
+
+class Retriever:
+    def __init__(self):
+        self.chunks = load_corpus()
+        self.bm25 = BM25(self.chunks)
+        self.dense = DenseIndex(self.chunks)
+
+    def search(self, query: str, k: int = 3) -> List[str]:
+        # Over-fetch from each tier before fusing: a chunk ranked 5th by both
+        # can fuse into the top 2.
+        rankings = [r for r in (self.bm25.search(query, k * 4),
+                                self.dense.search(query, k * 4)) if r]
+        if not rankings:
+            return []
+        return [self.chunks[i] for i, _ in
+                reciprocal_rank_fusion(rankings, top_k=k)]
+
+
+RETRIEVER: Optional[Retriever] = None
+
+
+def get_retriever() -> Retriever:
+    global RETRIEVER
+    if RETRIEVER is None:
+        RETRIEVER = Retriever()
+    return RETRIEVER
+
+
+SMALLTALK = {"hi", "hello", "hey", "thanks", "thank you", "ok", "okay", "bye",
+             "yeah", "yes", "no", "sure", "cheers"}
+
+
+def needs_retrieval(query: str) -> bool:
+    """Retrieving for 'hi' costs tokens and actively degrades the answer by
+    stuffing irrelevant passages into the prompt."""
+    q = (query or "").strip().lower().strip("?!. ")
+    if q in SMALLTALK:
+        return False
+    return len(q.split()) > 2
+
+
+def format_context(chunks: List[str]) -> str:
+    if not chunks:
+        return "(no reference material for this turn)"
+    return "\n\n".join(f"[{i}] {c.strip()}" for i, c in enumerate(chunks, 1))
+
+
+# =============================================================================
+# 8. STATE
+# =============================================================================
+# Every node receives the whole state and returns a PARTIAL UPDATE - a dict
+# containing only the keys it changed. LangGraph merges it using the reducers
+# declared below.
+#
+# A reducer is how concurrent writes to the same key are combined. Three guards
+# write `guards` at the same time; without a reducer LangGraph raises
+# InvalidUpdateError rather than silently dropping two of three results.
+
+def merge_guards(old, new):
+    """operator.add would append forever, and the checkpointer carries state
+    into the next turn - so turn 1's guards were still present on turn 5 and the
+    gate was reading stale results. This resets at the start of each turn."""
+    if new == ["__RESET__"]:
+        return []
+    return (old or []) + (new or [])
+
+
+def merge_facts(old, new):
+    """New values win; an empty value never erases a known one. This is why
+    memory can be permanent at a fixed token cost - the dict is updated, not
+    re-accumulated."""
+    merged = dict(old or {})
+    for k, v in (new or {}).items():
+        if v not in (None, "", [], {}):
+            merged[k] = v
+    return merged
+
+
+class State(TypedDict, total=False):
+    # --- input ---
+    query: str
+    session_id: str
+
+    # add_messages APPENDS, which is what accumulates the transcript
+    messages: Annotated[List[BaseMessage], add_messages]
+
+    # three concurrent writers
+    guards: Annotated[List[Dict[str, Any]], merge_guards]
+
+    # --- guard findings (single writer each, so no reducer: last wins) ---
+    verdict: str
+    crisis: bool
+    crisis_certain: bool     # True only when the DETERMINISTIC tier fired
+    subject: str             # selfharm | thirdparty | neither
+    route: str
+
+    # --- working data ---
+    facts: Annotated[Dict[str, Any], merge_facts]
+    context: List[str]
+    contributions: Annotated[List[Dict[str, str]], merge_guards]
+    hops: int
+    next_agent: str
+
+    # --- output ---
+    draft: str
+    critique: str
+    attempts: int
+    answer: str
+    escalated: bool
+
+
+# =============================================================================
+# 9. HELPERS
+# =============================================================================
+def to_groq_messages(history: List[BaseMessage]) -> List[Dict[str, str]]:
+    """LangGraph stores message objects; Groq wants plain dicts."""
+    return [{"role": "assistant" if isinstance(m, AIMessage) else "user",
+             "content": m.content}
+            for m in history if (m.content or "").strip()]
+
+
+def recent_context(state: State, n: int = 4) -> str:
+    """Recent turns plus the current message, for the guards.
+
+    Guards judging a message in isolation reject every natural follow-up -
+    "how old was she?" is not about grief on its own. Deliberately a SMALL
+    window: they only need enough to resolve a pronoun, and more context makes
+    classification worse, not better.
+    """
+    prior = state.get("messages", [])[-(n + 1):-1]
+    if not prior:
+        return state.get("query", "")
+    lines = [f"{'BOT' if isinstance(m, AIMessage) else 'USER'}: {m.content}"
+             for m in prior]
+    return ("Conversation so far:\n" + "\n".join(lines)
+            + f"\n\nLatest message to judge: {state.get('query', '')}")
+
+
+FAMILY = (r"mum|mom|mother|dad|father|wife|husband|partner|son|daughter|brother|"
+          r"sister|nan|nana|gran|grandma|grandad|grandmother|grandfather|"
+          r"friend|dog|cat|pet|baby|child")
+
+LOSS_REFERENCE = re.compile(
+    rf"\b(my|our|his|her|their)\s+(?:{FAMILY})(?:'?s)?\b"
+    r"|\b(funeral|cremation|burial|grave|ashes|grief|grieving|bereave\w*|"
+    r"died|death|dying|passed away|loss|anniversary|memorial)\b"
+    r"|\bmiss(?:ing)?\s+(her|him|them)\b"
+    r"|\b(her|his|their)\s+(name|age|birthday|things|clothes|room|voice)\b",
+    re.IGNORECASE,
+)
+
+PRONOUNS = re.compile(r"\b(she|he|they|her|him|his|their|hers|them)\b", re.IGNORECASE)
+
+
+def references_loss(state: State) -> bool:
+    """Deterministic check: is this message part of the grief conversation?
+
+    An LLM classifier asked "is this about grief?" answers "unrelated" for
+    "what was my mum's name and age" - in isolation that is a question about a
+    name. One wrong classification then told a grieving person they were
+    off-topic. Same principle as the crisis word list: where being wrong is
+    costly, put a deterministic rule next to the model and let it win.
+    """
+    q = state.get("query") or ""
+    if LOSS_REFERENCE.search(q):
+        return True
+    # A third-person pronoun on a bereavement service almost always means the
+    # person who died. Being wrong costs a slightly-too-warm reply; the other
+    # error tells a grieving person they are in the wrong place.
+    if PRONOUNS.search(q):
+        return True
+    low = q.lower()
+    for v in (state.get("facts") or {}).values():
+        if isinstance(v, str) and len(v) > 2 and v.lower() in low:
+            return True
+    return False
+
+
+def trace(node: str, t0: float, **extra) -> Dict[str, Any]:
+    return {"node": node, "ms": round((time.perf_counter() - t0) * 1000), **extra}
+
+
+# =============================================================================
+# 10. GUARD NODES
+# =============================================================================
+def node_intake(state: State) -> dict:
+    """Record the message and clear every per-turn field.
+
+    With a checkpointer you must decide for each key whether it is per-turn or
+    per-conversation. `messages` and `facts` persist; everything below resets.
+    Getting that wrong produces bugs that only appear on turn two.
+    """
+    q = (state.get("query") or "").strip()
+    return {
+        "query": q,
+        "messages": [HumanMessage(content=q)] if q else [],
+        "guards": ["__RESET__"],
+        "contributions": ["__RESET__"],
+        "crisis": False,
+        "crisis_certain": False,
+        "subject": "",
+        "context": [],
+        "hops": 0,
+        "next_agent": "",
+        "draft": "",
+        "critique": "",
+        "attempts": 0,
+        "answer": "",
+        "escalated": False,
     }
-    return table.get(lab, lab)
 
-# ----------------- Routes -----------------
-@app.route("/")
-def root_ok():
-    return "ok", 200
+
+def node_moderation(state: State) -> dict:
+    """Is the message itself abusive? A per-message property, so no context.
+
+    FAILS OPEN. Only an explicit "unsafe" blocks. An outage or a parse failure
+    must never stonewall a grieving person. Contrast with node_crisis, which
+    fails closed - different stakes, opposite default.
+    """
+    t0 = time.perf_counter()
+    try:
+        raw = clean(call(MODERATION_PROMPT, state.get("query", "")))
+        verdict = last_label(raw, {"safe", "unsafe"}, "safe")
+    except Exception as e:                              # noqa: BLE001
+        record_model_failure(e)
+        log.warning("moderation unavailable, failing open: %s", type(e).__name__)
+        verdict = "safe"
+    return {"guards": [{"name": "moderation", "passed": verdict != "unsafe",
+                        "label": verdict,
+                        "ms": round((time.perf_counter() - t0) * 1000)}]}
+
+
+def node_validation(state: State) -> dict:
+    """Is this still the grief conversation? Needs context to judge follow-ups."""
+    t0 = time.perf_counter()
+    try:
+        raw = clean(call(VALIDATION_PROMPT, recent_context(state)))
+        verdict = last_label(
+            raw, {"valid", "unrelated", "nonsense", "offensive", "harmful"}, "valid")
+    except Exception as e:                              # noqa: BLE001
+        record_model_failure(e)
+        log.warning("validation unavailable, defaulting to valid: %s", type(e).__name__)
+        verdict = "valid"
+
+    # Never tell someone they are off-topic about their own loss.
+    if verdict in ("unrelated", "nonsense") and references_loss(state):
+        log.info("validation override: %s -> valid (references the loss)", verdict)
+        verdict = "valid"
+
+    return {"verdict": verdict,
+            "guards": [{"name": "validation", "passed": verdict == "valid",
+                        "label": verdict,
+                        "ms": round((time.perf_counter() - t0) * 1000)}]}
+
+
+def node_crisis(state: State) -> dict:
+    """Is someone at risk, and is it this person or somebody else?
+
+    Three tiers combined with OR. The lexical tier needs no network, which is
+    why crisis recall survives a total provider outage.
+    """
+    t0 = time.perf_counter()
+    query = state.get("query", "")
+
+    lexical_hit = lexical_crisis(query)                 # tier 0, instant
+    lexical_subject = resolve_subject(query)            # deterministic
+
+    model_says = False
+    model_subject = None
+    try:
+        raw = clean(call(CRISIS_PROMPT, recent_context(state)))
+        model_says = last_label(raw, {"risk", "norisk"}, "norisk") == "risk"
+        if lexical_hit or model_says:
+            sub_raw = clean(call(SUBJECT_PROMPT, query))
+            model_subject = last_label(
+                sub_raw, {"selfharm", "thirdparty", "neither"}, None)
+    except Exception as e:                              # noqa: BLE001
+        # One failure fails closed for THIS message - the check was uncertain.
+        # Sustained failure means the provider is down, so trust the lexical
+        # tier rather than calling every user a crisis.
+        model_says = not record_model_failure(e)
+
+    is_crisis = lexical_hit or model_says
+
+    # Deterministic subject wins where it is confident; the model only fills in
+    # when the regex saw nothing either way.
+    if lexical_subject != "neither":
+        subject = lexical_subject
+    elif model_subject in ("selfharm", "thirdparty"):
+        subject = model_subject
+    else:
+        subject = "selfharm"
+    return {
+        "crisis": is_crisis,
+        "crisis_certain": lexical_hit,
+        "subject": subject if is_crisis else "neither",
+        "guards": [{"name": "crisis", "passed": not is_crisis,
+                    "label": ("crisis:" + subject) if is_crisis else "clear",
+                    "ms": round((time.perf_counter() - t0) * 1000)}],
+    }
+
+
+# =============================================================================
+# 11. ROUTING
+# =============================================================================
+def node_gate(state: State) -> dict:
+    """Runs AFTER all three guards, so it is the first point where all three
+    results are visible - none of them could see each other.
+
+    THE ORDER OF THESE CHECKS IS THE SAFETY DESIGN.
+    """
+    g = {x["name"]: x for x in state.get("guards", []) if isinstance(x, dict)}
+    log.info("gate | %s", [(x["name"], x["label"], f"{x['ms']}ms")
+                           for x in state.get("guards", []) if isinstance(x, dict)])
+
+    subject = state.get("subject", "neither")
+
+    # 1. Worried about someone else. Checked FIRST because the reply is
+    #    addressed to a different person - getting this wrong tells a
+    #    frightened relative that THEY are not a burden.
+    if state.get("crisis") and subject == "thirdparty":
+        return {"route": "thirdparty"}
+
+    # 2. A deterministic first-person crisis hit outranks everything else.
+    if state.get("crisis_certain"):
+        return {"route": "crisis"}
+
+    moderation_failed = not g.get("moderation", {}).get("passed", True)
+    verdict = state.get("verdict", "valid")
+
+    # 3. A MODEL-ONLY crisis flag on a message moderation calls abusive is
+    #    almost always the risk model over-firing on violent language. Handing
+    #    a helpline to someone demanding hate speech helps nobody.
+    if moderation_failed and verdict in ("offensive", "harmful"):
+        return {"route": "refuse"}
+
+    if state.get("crisis"):
+        return {"route": "crisis"}
+    if moderation_failed:
+        return {"route": "refuse"}
+
+    if verdict in ("harmful", "offensive"):
+        return {"route": "refuse"}
+
+    if verdict == "unrelated":
+        # Once we know who died, one "unrelated" verdict is far more likely to
+        # be a classifier error than a real topic change - and the cost of being
+        # wrong is telling a bereaved person they are in the wrong place.
+        if state.get("facts") or references_loss(state):
+            log.info("gate override: unrelated -> support (established conversation)")
+            return {"route": "support"}
+        return {"route": "offtopic"}
+
+    return {"route": "support"}
+
+
+def pick_route(state: State) -> str:
+    return state.get("route", "support")
+
+
+# =============================================================================
+# 12. MEMORY AND RETRIEVAL NODES
+# =============================================================================
+def node_remember(state: State) -> dict:
+    """Pull durable facts out of the message.
+
+    On the SUPPORT branch only: the crisis path must stay the fastest route in
+    the graph, and there is no point extracting biography from a message we are
+    about to refuse.
+    """
+    t0 = time.perf_counter()
+    query = state.get("query", "")
+    if not might_have_facts(query):
+        return {}                                       # no model call at all
+
+    # Deterministic extraction first. A live run showed the model extracting
+    # the timeframe from "I lost my wife Priya in the spring" but NOT the name -
+    # the single most important field in the schema.
+    facts = lexical_facts(query)
+
+    try:
+        parsed = sanitise_facts(parse_json_object(
+            call(EXTRACT_PROMPT, query, max_tokens=400)))
+        # The model may add fields the regex cannot see (cause, dates), but the
+        # regex wins on the fields it is confident about.
+        merged = {**parsed, **facts}
+    except Exception as e:                              # noqa: BLE001
+        record_model_failure(e)
+        log.warning("fact extraction failed (non-fatal): %s", type(e).__name__)
+        merged = facts
+
+    if merged:
+        log.info("remembered %s in %dms", merged,
+                 round((time.perf_counter() - t0) * 1000))
+    return {"facts": merged} if merged else {}
+
+
+def node_retrieve(state: State) -> dict:
+    """Grounding. Skipped for small talk."""
+    t0 = time.perf_counter()
+    query = state.get("query", "")
+    if not needs_retrieval(query):
+        return {"context": []}
+    try:
+        chunks = get_retriever().search(query, k=3)
+    except Exception as e:                              # noqa: BLE001
+        log.warning("retrieval failed (non-fatal): %s", e)
+        chunks = []
+    log.debug("retrieved %d chunks in %dms", len(chunks),
+              round((time.perf_counter() - t0) * 1000))
+    return {"context": chunks}
+
+
+# =============================================================================
+# 13. SPECIALISTS AND SUPERVISOR
+# =============================================================================
+#  remember -> retrieve -> supervisor --> emotional  --+
+#                            ^  |         coping    --|
+#                            |  |         practical --+--> back to supervisor
+#                            |  |         resources --+
+#                            |  +--> compose -> critic -> END
+#                            +---------+
+#
+# Every specialist reports BACK to the hub. That is what makes this a
+# supervisor and not a swarm - in a swarm the receiving agent stays active,
+# and a specialist holding the conversation could bypass the guardrail layer.
+
+SPECIALISTS = {"emotional", "coping", "practical", "resources"}
+
+# Most grief messages need only the emotional specialist, and paying a model
+# call to be told that is waste. These detect the only cases where another
+# specialist could be warranted; if none fire, routing costs zero model calls.
+COPING_HINTS = re.compile(
+    r"\b(tips?|advice|advise|suggestions?|recommend|"
+    r"what (can|should|do) i do|how (do|can) i (cope|manage|deal|get through|handle)|"
+    r"help me (cope|get through|deal|manage)|"
+    r"ways? to (cope|manage|deal|get through)|"
+    r"anything (that|which) helps|what helps|how do people)\b", re.IGNORECASE)
+
+PRACTICAL_HINTS = re.compile(
+    r"\b(register(ing)?|registrar|death certificate|funeral|cremation|burial|"
+    r"probate|will|estate|executor|inherit|employer|hr|bank|pension|benefits|"
+    r"tell us once|paperwork|admin|arrange|arrangements|solicitor|"
+    r"how do i tell|what do i do about|who do i (tell|inform|contact))\b",
+    re.IGNORECASE)
+
+RESOURCE_HINTS = re.compile(
+    r"\b(support group|counsell?ing|counsell?or|therapy|therapist|gp|doctor|"
+    r"charity|helpline|service|where can i|who can i (talk|speak)|"
+    r"is there (anyone|anything|help)|need help|get help)\b", re.IGNORECASE)
+
+
+def specialist_signals(text: str) -> set:
+    out = set()
+    if COPING_HINTS.search(text or ""):
+        out.add("coping")
+    if PRACTICAL_HINTS.search(text or ""):
+        out.add("practical")
+    if RESOURCE_HINTS.search(text or ""):
+        out.add("resources")
+    return out
+
+
+def node_supervisor(state: State) -> dict:
+    """Decide which specialist contributes next, or finish."""
+    done = [c["agent"] for c in state.get("contributions", [])
+            if isinstance(c, dict)]
+    hops = state.get("hops", 0)
+
+    if hops >= MAX_HOPS:
+        return {"next_agent": "compose"}
+    remaining = SPECIALISTS - set(done)
+    if not remaining:
+        return {"next_agent": "compose"}
+
+    signals = specialist_signals(state.get("query", "")) - set(done)
+
+    # FAST PATH: no model call. The supervisor only thinks when the decision is
+    # genuinely ambiguous.
+    if not signals:
+        if not done:
+            return {"next_agent": "emotional", "hops": hops + 1}
+        return {"next_agent": "compose"}
+
+    # The emotional specialist always leads, even when something else is needed.
+    if "emotional" in remaining:
+        return {"next_agent": "emotional", "hops": hops + 1}
+
+    candidates = remaining & signals
+    if not candidates:
+        return {"next_agent": "compose"}
+
+    try:
+        raw = clean(call(SUPERVISOR_PROMPT,
+                         f"User message: {state.get('query', '')}\n"
+                         f"Already contributed: {done or 'none'}\n"
+                         f"Candidates: {sorted(candidates)}"))
+        choice = last_label(raw, candidates | {"finish"}, sorted(candidates)[0])
+    except Exception as e:                              # noqa: BLE001
+        record_model_failure(e)
+        choice = sorted(candidates)[0]
+
+    if choice == "finish" or choice not in candidates:
+        return {"next_agent": "compose"}
+    log.info("supervisor -> %s", choice)
+    return {"next_agent": choice, "hops": hops + 1}
+
+
+SUPERVISOR_PROMPT = """You coordinate a small team supporting someone grieving.
+
+- emotional : sits with feelings. Acknowledgement and reflection.
+- coping    : gentle wellbeing suggestions, WHEN THE PERSON HAS ASKED.
+- practical : UK bereavement admin - registering a death, funerals, probate.
+- resources : names kinds of UK support services.
+
+Given the message and who has already contributed, decide who goes NEXT.
+
+- MOST messages need ONLY "emotional". Do not over-delegate.
+- Never pick the same specialist twice.
+- Reply "finish" as soon as the contributions cover what was asked.
+
+Reply with exactly one word on its own final line:
+emotional, coping, practical, resources, or finish."""
+
+
+def pick_specialist(state: State) -> str:
+    return state.get("next_agent", "compose")
+
+
+PACING_HINT = ("This person has been asked a question recently. Do not ask "
+               "another one - just be present.")
+
+
+def _pacing(state: State) -> str:
+    """Stop the bot interrogating people.
+
+    A reply that ends in a question every single turn reads as an interview,
+    not company. If the last thing we said was a question, don't ask again.
+    """
+    for m in reversed(state.get("messages", [])):
+        if isinstance(m, AIMessage):
+            return PACING_HINT if "?" in (m.content or "") else ""
+    return ""
+
+
+def _specialist(name: str, system: str, state: State, **fmt) -> dict:
+    """Run one specialist and report BACK to the supervisor.
+
+    Uses ask() - the big model with conversation history - not call(), which is
+    one isolated question to the small model. Specialists WRITE; guards
+    CLASSIFY. Getting that wrong left the specialists with no conversational
+    thread at all.
+    """
+    recent = state.get("messages", [])[-KEEP_MESSAGES:]
+    try:
+        text = clean(ask(to_groq_messages(recent),
+                         system=system.format(**fmt) if fmt else system))
+    except Exception as e:                              # noqa: BLE001
+        record_model_failure(e)
+        log.warning("specialist %s failed: %s", name, type(e).__name__)
+        text = ""
+    return {"contributions": [{"agent": name, "content": text}]}
+
+
+def node_emotional(state: State) -> dict:
+    return _specialist("emotional", EMOTIONAL_PROMPT, state,
+                       facts=format_facts(state.get("facts", {})),
+                       context=format_context(state.get("context", [])),
+                       pacing=_pacing(state))
+
+
+def node_coping(state: State) -> dict:
+    return _specialist("coping", COPING_PROMPT, state,
+                       facts=format_facts(state.get("facts", {})),
+                       context=format_context(state.get("context", [])))
+
+
+def node_practical(state: State) -> dict:
+    return _specialist("practical", PRACTICAL_PROMPT, state,
+                       context=format_context(state.get("context", [])))
+
+
+def node_resources(state: State) -> dict:
+    return _specialist("resources", RESOURCES_PROMPT, state)
+
+
+# =============================================================================
+# 14. COMPOSE AND CRITIC
+# =============================================================================
+def node_compose(state: State) -> dict:
+    """Merge the specialists into one voice.
+
+    Skipped entirely when there is one contribution - which is most turns.
+    Nothing to merge, so paying for a rewrite adds latency and risk.
+    """
+    contribs = [c for c in state.get("contributions", [])
+                if isinstance(c, dict) and (c.get("content") or "").strip()]
+
+    if not contribs:
+        return {"draft": "I'm here. Tell me what's happening."}
+
+    if len(contribs) == 1 and not state.get("critique"):
+        return {"draft": contribs[0]["content"]}        # no model call
+
+    blob = "\n\n".join(f"[{c['agent']}] {c['content']}" for c in contribs)
+    system = COMPOSE_PROMPT
+    if state.get("critique"):
+        system += f"\n\nYour previous attempt was rejected: {state['critique']}"
+
+    recent = state.get("messages", [])[-KEEP_MESSAGES:]
+    try:
+        merged = clean(ask(to_groq_messages(recent),
+                           system=system + "\n\nContributions:\n" + blob))
+    except Exception as e:                              # noqa: BLE001
+        record_model_failure(e)
+        merged = "\n\n".join(c["content"] for c in contribs)
+    log.debug("composed %d contributions", len(contribs))
+    return {"draft": merged}
+
+
+def node_critic(state: State) -> dict:
+    """Review the draft before it ships.
+
+    Reflection works because reviewing is easier than writing - the same model
+    that slips in a platitude will identify it immediately when shown the
+    sentence.
+
+    FAILS OPEN. A critic that cannot make itself understood must not block a
+    reply to a grieving person.
+    """
+    draft = (state.get("draft") or "").strip()
+    attempts = state.get("attempts", 0)
+
+    def accept(text: str, why: str) -> dict:
+        log.info("critic: %s", why)
+        return {"answer": text, "messages": [AIMessage(content=text)]}
+
+    if not draft:
+        return accept("I'm here. Tell me what's happening.", "empty draft")
+
+    # Bound first. An unbounded model-driven loop is an unbounded bill and a
+    # request that never returns.
+    if attempts >= MAX_CRITIQUE_ROUNDS:
+        return accept(draft, f"ship after {attempts} rewrite(s)")
+
+    try:
+        # The critic must see the USER'S MESSAGE too, or it cannot tell
+        # requested advice from unsolicited advice - and rejects both.
+        raw = clean(call(CRITIC_PROMPT,
+                         f"What the user said:\n{state.get('query', '')}\n\n"
+                         f"Draft reply to review:\n{draft}",
+                         max_tokens=400))
+    except Exception as e:                              # noqa: BLE001
+        record_model_failure(e)
+        return accept(draft, "critic unavailable, shipping draft")
+
+    verdict = last_label(raw, {"pass", "fail"}, "pass")
+    if verdict == "pass":
+        return accept(draft, f"pass on attempt {attempts + 1}")
+
+    note = raw.rsplit("fail", 1)[0].strip()[-200:] or "too long or too advisory"
+    log.info("critic: fail -> %s", note)
+    return {"critique": note, "attempts": attempts + 1}
+
+
+def after_critic(state: State) -> str:
+    """`answer` is only set when the critic accepted."""
+    return "done" if state.get("answer") else "retry"
+
+
+# =============================================================================
+# 15. TERMINAL NODES
+# =============================================================================
+def node_crisis_response(state: State) -> dict:
+    """The model writes the human sentences; the FILE supplies the numbers.
+
+    If the model call fails entirely the helplines still ship. The part that
+    can save someone never depends on the model working.
+    """
+    try:
+        warm = clean(ask(
+            to_groq_messages(state.get("messages", [])[-KEEP_MESSAGES:]),
+            system=CRISIS_SYSTEM.format(facts=format_facts(state.get("facts", {}))),
+            max_tokens=400))
+    except Exception as e:                              # noqa: BLE001
+        record_model_failure(e)
+        warm = ("Thank you for telling me that. What you're carrying sounds "
+                "heavier than anyone should hold on their own tonight.")
+    answer = warm.strip() + HELPLINES
+    log.warning(json.dumps({"event": "crisis_escalation",
+                            "session": (state.get("session_id") or "")[:8],
+                            "subject": "selfharm"}))
+    return {"answer": answer, "escalated": True,
+            "messages": [AIMessage(content=answer)]}
+
+
+def node_thirdparty_response(state: State) -> dict:
+    """Someone worried about another person.
+
+    Addressed to THEM, not the person they are worried about. Without this the
+    bot says "you're not a burden" to someone frightened about their brother.
+    """
+    try:
+        warm = clean(ask(
+            to_groq_messages(state.get("messages", [])[-KEEP_MESSAGES:]),
+            system=THIRDPARTY_SYSTEM, max_tokens=400))
+    except Exception as e:                              # noqa: BLE001
+        record_model_failure(e)
+        warm = ("It's frightening to be the one who notices, and it says a lot "
+                "that you're taking it seriously.")
+    answer = warm.strip() + THIRDPARTY_HELPLINES
+    log.warning(json.dumps({"event": "crisis_escalation",
+                            "session": (state.get("session_id") or "")[:8],
+                            "subject": "thirdparty"}))
+    return {"answer": answer, "escalated": True,
+            "messages": [AIMessage(content=answer)]}
+
+
+def node_refuse(state: State) -> dict:
+    """Deterministic. No model call - nothing to gain, and you do not want a
+    model improvising on a harmful input."""
+    a = ("I can't help with that one. If something painful is behind it, "
+         "I'm still here.")
+    return {"answer": a, "messages": [AIMessage(content=a)]}
+
+
+def node_offtopic(state: State) -> dict:
+    a = ("That's outside what I can help with, but I'm here if something "
+         "heavier is sitting with you.")
+    return {"answer": a, "messages": [AIMessage(content=a)]}
+
+
+# =============================================================================
+# 16. GRAPH
+# =============================================================================
+def build_graph(checkpointer):
+    b = StateGraph(State)
+
+    for name, fn in [
+        ("intake", node_intake),
+        ("moderation", node_moderation),
+        ("validation", node_validation),
+        ("crisis_guard", node_crisis),        # NOT "crisis" - that is a state key
+        ("gate", node_gate),
+        ("remember", node_remember),
+        ("retrieve", node_retrieve),
+        ("supervisor", node_supervisor),
+        ("emotional", node_emotional),
+        ("coping", node_coping),
+        ("practical", node_practical),
+        ("resources", node_resources),
+        ("compose", node_compose),
+        ("critic", node_critic),
+        ("crisis_response", node_crisis_response),
+        ("thirdparty_response", node_thirdparty_response),
+        ("refuse", node_refuse),
+        ("offtopic", node_offtopic),
+    ]:
+        b.add_node(name, fn)
+
+    b.add_edge(START, "intake")
+
+    # Three arrows OUT of intake  = the guards run at the same time.
+    # Three arrows INTO gate      = gate waits until all three have finished.
+    for guard in ("moderation", "validation", "crisis_guard"):
+        b.add_edge("intake", guard)
+        b.add_edge(guard, "gate")
+
+    b.add_conditional_edges("gate", pick_route, {
+        "support":    "remember",
+        "crisis":     "crisis_response",
+        "thirdparty": "thirdparty_response",
+        "refuse":     "refuse",
+        "offtopic":   "offtopic",
+    })
+
+    # Support branch: remember, ground, then the team.
+    b.add_edge("remember", "retrieve")
+    b.add_edge("retrieve", "supervisor")
+
+    b.add_conditional_edges("supervisor", pick_specialist, {
+        "emotional": "emotional",
+        "coping":    "coping",
+        "practical": "practical",
+        "resources": "resources",
+        "compose":   "compose",
+    })
+
+    # Every specialist reports BACK to the hub.
+    for s in ("emotional", "coping", "practical", "resources"):
+        b.add_edge(s, "supervisor")
+
+    # compose -> critic, and the critic can point BACK. An edge going backwards
+    # is all a loop is.
+    b.add_edge("compose", "critic")
+    b.add_conditional_edges("critic", after_critic, {
+        "retry": "compose",
+        "done":  END,
+    })
+
+    for terminal in ("crisis_response", "thirdparty_response", "refuse", "offtopic"):
+        b.add_edge(terminal, END)
+
+    return b.compile(checkpointer=checkpointer)
+
+
+# --- persistence -------------------------------------------------------------
+# Absolute path so the database is always beside app.py. A relative path
+# silently creates a SECOND empty database if you launch from elsewhere, which
+# looks exactly like "memory stopped working after a restart".
+#
+# check_same_thread=False: Flask serves each request on a different thread.
+# isolation_level=None:    autocommit, so a write is durable immediately rather
+#                          than waiting for a commit that never comes on Ctrl+C.
+_conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None)
+_conn.execute("PRAGMA journal_mode=WAL")
+_conn.execute("PRAGMA synchronous=FULL")
+atexit.register(lambda: (_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)"),
+                         _conn.close()))
+
+graph = build_graph(SqliteSaver(_conn))
+log.info("memory db: %s", DB_PATH)
+
+
+# =============================================================================
+# 17. PUBLIC API
+# =============================================================================
+SAFE_FALLBACK = ("I'm having trouble finding my words just now. Can you give me "
+                 "a moment and try again?")
+
+
+def ask_bot(query: str, session_id: str = "default") -> Dict[str, Any]:
+    """One turn. Never raises - a grief bot that 500s is worse than one that
+    says something plain."""
+    t0 = time.perf_counter()
+    try:
+        out = graph.invoke(
+            {"query": query, "session_id": session_id},
+            {"configurable": {"thread_id": session_id}},
+        )
+        answer = (out.get("answer") or "").strip() or SAFE_FALLBACK
+        return {
+            "response": answer,
+            "route": out.get("route", "unknown"),
+            "escalated": bool(out.get("escalated")),
+            "degraded": is_degraded(),
+            "latency_ms": round((time.perf_counter() - t0) * 1000),
+        }
+    except Exception as e:                              # noqa: BLE001
+        log.exception("turn failed for session %s", session_id[:8])
+        return {
+            "response": SAFE_FALLBACK,
+            "route": "error",
+            "escalated": False,
+            "degraded": True,
+            "latency_ms": round((time.perf_counter() - t0) * 1000),
+        }
+
+
+def session_facts(session_id: str) -> Dict[str, Any]:
+    """What the bot remembers. A demo aid, and a GDPR subject-access route -
+    people are entitled to see the personal data you hold about them."""
+    try:
+        snap = graph.get_state({"configurable": {"thread_id": session_id}})
+        values = snap.values or {}
+        return {"facts": values.get("facts", {}),
+                "turns": len(values.get("messages", [])) // 2}
+    except Exception:                                   # noqa: BLE001
+        return {"facts": {}, "turns": 0}
+
+
+def forget_session(session_id: str) -> bool:
+    """Delete everything held for one conversation.
+
+    'Delete my data' has to actually clear the checkpointer rows, not just hide
+    them. This is special-category data under UK GDPR.
+    """
+    try:
+        with _conn:
+            _conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (session_id,))
+            _conn.execute("DELETE FROM writes WHERE thread_id = ?", (session_id,))
+        log.info("erased session %s", session_id[:8])
+        return True
+    except Exception as e:                              # noqa: BLE001
+        log.error("erase failed: %s", e)
+        return False
+
+
+# =============================================================================
+# 18. WEB LAYER
+# =============================================================================
+# Thin on purpose: read JSON, call ask_bot, return JSON. All the thinking is in
+# the graph.
+
+app = Flask(__name__)
+
+# The original allowed any origin while also setting a session cookie. A
+# wildcard origin plus credentials is the combination that lets any website on
+# the internet make requests on a user's behalf.
+ALLOWED_ORIGINS = [o.strip() for o in
+                   os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,"
+                             "http://localhost:5173").split(",") if o.strip()]
+CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGINS}},
+     supports_credentials=True)
+
+# --- session identity --------------------------------------------------------
+# The original took session_id straight from the request body. Since session_id
+# IS the memory key, anyone who learned another user's id could read their grief
+# conversation. The client no longer names its own thread: it presents a signed
+# token and the server derives the id. In production this becomes real auth and
+# the id derives from an authenticated subject claim.
+_SECRET = (os.getenv("SESSION_SECRET") or "").encode() or os.urandom(32)
+REQUIRE_TOKEN = os.getenv("REQUIRE_SESSION_TOKEN", "1") != "0"
+
+
+def mint_token() -> str:
+    sid = uuid.uuid4().hex
+    sig = hmac.new(_SECRET, sid.encode(), hashlib.sha256).hexdigest()[:32]
+    return f"{sid}.{sig}"
+
+
+def verify_token(token: str) -> Optional[str]:
+    try:
+        sid, sig = token.split(".", 1)
+    except (ValueError, AttributeError):
+        return None
+    expected = hmac.new(_SECRET, sid.encode(), hashlib.sha256).hexdigest()[:32]
+    # compare_digest, not ==, to avoid a timing side channel.
+    return sid if hmac.compare_digest(sig, expected) else None
+
+
+def resolve_session() -> tuple:
+    """Returns (session_id, error_response)."""
+    token = request.headers.get("X-Session-Token")
+    if token:
+        sid = verify_token(token)
+        if sid:
+            return sid, None
+        return None, (jsonify({"error": "invalid session token"}), 401)
+    if REQUIRE_TOKEN:
+        return None, (jsonify({"error": "missing X-Session-Token; "
+                                        "POST /session first"}), 401)
+    data = request.get_json(silent=True) or {}
+    return (data.get("session_id") or "default"), None
+
+
+# --- simple per-session rate limit -------------------------------------------
+_HITS: Dict[str, deque] = {}
+_HITS_LOCK = threading.Lock()
+RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_MIN", "20"))
+
+
+def rate_limited(session_id: str) -> bool:
+    now = time.monotonic()
+    with _HITS_LOCK:
+        q = _HITS.setdefault(session_id, deque())
+        while q and now - q[0] > 60:
+            q.popleft()
+        if len(q) >= RATE_LIMIT:
+            return True
+        q.append(now)
+        return False
+
 
 @app.route("/health")
 def health():
-    return {"status": "ok"}, 200
+    return {"status": "ok", "degraded": is_degraded(),
+            "tokens_used_last_min": BUDGET.used()}, 200
 
-@app.route("/warmup")
-def warmup():
-    try:
-        build_tfidf_index()
-        # optional ping to Groq
-        try:
-            groq_chat_with_failover(
-                [{"role": "user", "content": "ping"}],
-                parse_model_list("GROQ_MODELS", DEFAULT_QA_MODELS),
-                temperature=0, max_tokens=4
-            )
-        except Exception as e:
-            print("ℹ️ Warmup Groq failed (non-fatal):", e)
-        return "warmed", 200
-    except Exception as e:
-        return f"warmup error: {e}", 500
+
+@app.route("/session", methods=["POST"])
+def create_session():
+    return jsonify({"session_token": mint_token()})
+
 
 @app.route("/ask", methods=["POST"])
-def ask():
+def ask_route():                       # not ask() - that name is the LLM helper
+    session_id, err = resolve_session()
+    if err:
+        return err
+
     data = request.get_json(silent=True) or {}
-    query = data.get("question")
+    query = (data.get("question") or "").strip()
     if not query:
         return jsonify({"error": "Missing question"}), 400
+    if len(query) > 4000:
+        return jsonify({"error": "Message too long"}), 400
+    if rate_limited(session_id):
+        return jsonify({"error": "Too many messages, please slow down"}), 429
 
-    # Use your frontend’s session_id (currentUserId). If absent, fall back to cookie/new UUID.
-    session_id = data.get("session_id") or request.cookies.get("sid") or str(uuid4())
+    result = ask_bot(query, session_id)
+    result["session_id"] = session_id
+    return jsonify(result)
+
+
+@app.route("/session/state", methods=["GET"])
+def state_route():
+    session_id, err = resolve_session()
+    if err:
+        return err
+    return jsonify(session_facts(session_id))
+
+
+@app.route("/session/forget", methods=["POST"])
+def forget_route():
+    session_id, err = resolve_session()
+    if err:
+        return err
+    ok = forget_session(session_id)
+    return jsonify({"erased": ok}), (200 if ok else 500)
+
+
+def warmup() -> None:
+    """Build the index once at startup rather than inside the first request."""
     try:
-        response_text = ask_bot(query, session_id)
-        resp = jsonify({"response": response_text, "session_id": session_id})
-        if not request.cookies.get("sid"):
-            resp.set_cookie("sid", session_id, max_age=60*60*24*7, httponly=False, samesite="Lax")
-        return resp
-    except Exception as e:
-        print("❌ /ask error:", e)
-        return jsonify({"error": str(e)}), 500
-    
-@app.route("/moderate", methods=["POST"])
-def moderate():
-    data = request.get_json(silent=True) or {}
-    content = (data.get("content") or "").strip()
-    if not content:
-        return jsonify({"error": "Missing 'content'"}), 400
+        get_retriever()
+    except Exception as e:                              # noqa: BLE001
+        log.warning("warmup failed (non-fatal): %s", e)
 
-    try:
-        clf = get_classifier()
-        out = clf(content)
-        top = out[0] if isinstance(out, list) else out
-
-        id2label = None
-        try:
-            id2label = getattr(clf.model.config, "id2label", None)
-        except Exception:
-            pass
-
-        label = _normalize_label(top.get("label"), id2label=id2label)
-        # ensure one of our four
-        if label not in {"neither", "offensive", "hate", "suicidal"}:
-            # last resort: simple heuristics to fit one of the four
-            t = content.lower()
-            if any(k in label for k in ["suicid", "self-harm"]) or "kill myself" in t:
-                label = "suicidal"
-            elif "hate" in label:
-                label = "hate"
-            elif label in {"toxic","abusive","harassment","insult","offense","offencive"}:
-                label = "offensive"
-            else:
-                label = "neither"
-
-        return jsonify({"is_safe": (label == "neither"), "label": label}), 200
-
-    except Exception as e:
-        log.exception("Moderation failed")
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/test-cors", methods=["GET"])
-def test_cors():
-    return jsonify({"message": "CORS is working!"})
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    warmup()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
