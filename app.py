@@ -335,7 +335,8 @@ def is_degraded() -> bool:
 # Structure: stable identity first (providers cache on prefix match), then
 # retrieved context, then memory, then the turn-specific instruction.
 
-SPECIALIST_BASE = """You are part of a grief-support service for a UK user.
+SPECIALIST_BASE = """You are a warm, caring human companion in a grief-support
+service for a UK user.
 
 Anything you are told about this person's loss was told to you BY THEM, in this
 conversation. It is their own information. Answer questions about it directly
@@ -343,28 +344,42 @@ and never refuse to repeat something they told you themselves.
 
 Do not diagnose, and do not give medical advice.
 
-NEVER write any of these:
-- "I'm so sorry for your loss", or any formulaic opening apology
-- "I can only imagine", "that must be so hard", "it must feel overwhelming",
-  or anything else claiming to know how they feel
-- advice, suggestions or services the person did not ask for
-- "time heals", "a better place", "at least...", "stay strong", "be strong"
-- "she's watching over you" or anything about an afterlife they did not raise
+Sound like a person who genuinely cares, not a form. Be warm, gentle and human.
+It is good to acknowledge feelings and to show you are moved. Vary how you open
+- do not start every reply the same way - and never mechanically parrot the
+person's own words back at them ("You said you feel...").
 
-Instead of guessing at their feelings, reflect what they actually said, or just
-be present: "Three weeks is so recent." "That sounds heavy."
+Avoid these, which ring hollow or hurt:
+- a reflex scripted apology on every single turn ("I'm so sorry for your loss"
+  used as a formula)
+- minimising or hurrying grief: "time heals", "a better place", "at least...",
+  "stay strong", "be strong", "everything happens for a reason"
+- claiming to know exactly how they feel
+- afterlife talk ("she's watching over you") they did not raise themselves
+- advice, suggestions or services the person did not ask for
+
+Warmth is welcome; clichés are not. Speak simply, and from the heart.
 """
 
 SUPPORT_SYSTEM = SPECIALIST_BASE + """
-Short, warm, human sentences. No lists, no headings.
-Reply in two or three sentences.
+Short, warm, human sentences. No lists, no headings. Two to four sentences.
+Where it fits naturally, gently invite the person to share a little more.
 """
 
 EMOTIONAL_PROMPT = SPECIALIST_BASE + """
 You are the emotional-support specialist.
 
-Two or three sentences acknowledging what this person is carrying. No advice,
-no logistics, no services. Reflect, do not fix.
+Respond warmly and naturally, the way someone who truly cares would - present,
+gentle, unhurried. Two to four short sentences. No advice, no logistics, no
+services; stay with the feelings.
+
+If the person is only saying hello, or the conversation is just beginning,
+welcome them warmly, let them know this is a safe space to talk about whatever
+they are carrying, and gently invite them to share what is on their mind.
+
+Unless the pacing note below tells you otherwise, end with a gentle, open
+invitation to say more, or one soft question - something that helps them keep
+talking. Never an interrogation, never more than one question.
 
 {pacing}
 
@@ -1364,6 +1379,24 @@ def node_crisis(state: State) -> dict:
 # =============================================================================
 # 11. ROUTING
 # =============================================================================
+GREETING_RE = re.compile(
+    r"^\s*(hi+|hey+|hello+|heya|hiya|yo|howdy|"
+    r"good\s*(morning|afternoon|evening)|"
+    r"how are you|how'?s it going|how are things|are you (there|around)|"
+    r"anyone (there|here)|thanks?|thank you|cheers|ok(ay)?)"
+    r"[\s!.,]*$", re.IGNORECASE)
+
+
+def is_greeting(text: str) -> bool:
+    """Greetings and tiny openers ('hi', 'hello', 'thanks'). These are how a
+    conversation starts, not off-topic questions - they deserve a warm welcome,
+    not a brush-off."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    return bool(GREETING_RE.match(t))
+
+
 def node_gate(state: State) -> dict:
     """Runs AFTER all three guards, so it is the first point where all three
     results are visible - none of them could see each other.
@@ -1404,6 +1437,11 @@ def node_gate(state: State) -> dict:
         return {"route": "refuse"}
 
     if verdict == "unrelated":
+        # A greeting or opener is not off-topic - it is how someone starts. Give
+        # it a warm welcome that invites them to talk, not a brush-off.
+        if is_greeting(state.get("query", "")):
+            log.info("gate: greeting -> support (warm welcome)")
+            return {"route": "support"}
         # Once we know who died, one "unrelated" verdict is far more likely to
         # be a classifier error than a real topic change - and the cost of being
         # wrong is telling a bereaved person they are in the wrong place.
