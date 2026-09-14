@@ -358,6 +358,14 @@ Avoid these, which ring hollow or hurt:
 - afterlife talk ("she's watching over you") they did not raise themselves
 - advice, suggestions or services the person did not ask for
 
+Stay grounded in what they actually said. Never invent or infer details they
+did not give - an age is not a length of time you shared, and one word is not a
+whole story. Do not state anything back as fact that they did not tell you. If
+something they say seems impossible or self-contradictory (an age that cannot be
+right, dates that do not add up), do NOT echo it back as true or call it
+remarkable - gently and warmly check what they meant, in one soft question,
+without making them feel judged.
+
 Warmth is welcome; clichés are not. Speak simply, and from the heart.
 """
 
@@ -598,6 +606,10 @@ Pay particular attention to NAMES. "I lost my wife Priya" means
 deceased_name is "Priya" and relationship is "wife". "My mum Margaret died"
 means deceased_name is "Margaret" and relationship is "mother".
 
+A pet counts as a loss. "My dog died" -> relationship "dog"; "its name was
+Maggie" / "her name was Maggie" -> deceased_name "Maggie". Capture a pet's
+name, kind (dog, cat, ...) and age just as you would for a person.
+
 If there are no new facts, return {}."""
 
 # Contact details live HERE, in the repo. A model that invents a plausible
@@ -744,8 +756,10 @@ _NUM = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|f
 FACT_HINTS = re.compile(
     r"\b(my|his|her|their|our)\s+(mum|mom|mother|dad|father|wife|husband|"
     r"partner|son|daughter|brother|sister|nan|nana|gran|grandma|grandad|"
-    r"grandmother|grandfather|friend|dog|cat|pet|baby|child)\b"
+    r"grandmother|grandfather|friend|dog|cat|pet|puppy|pup|kitten|rabbit|"
+    r"hamster|bird|parrot|horse|pony|tortoise|fish|baby|child)\b"
     r"|\b(?:called|named)\s+[A-Z]\w+"
+    r"|\bname\s+(?:was|is)\s+[A-Z]\w+"
     r"|\bwas\s+\d{1,3}\b|\b\d{1,3}\s*(?:years?\s*old|yo)\b"
     r"|\b(died|passed away|passed|lost|funeral|cremation|burial|cancer|stroke|"
     r"heart attack|accident|suicide|overdose|illness)\b"
@@ -761,11 +775,15 @@ FACT_HINTS = re.compile(
 # NAME group still requires a capital. A blanket re.IGNORECASE here would match
 # "my mum died" and record "died" as her name.
 NAME_AFTER_RELATION = re.compile(
-    r"\b(?i:my|our)\s+(?i:(mum|mom|mother|dad|father|wife|husband|partner|son|"
+    r"\b(?i:my|our)\s+(?i:pet\s+)?"
+    r"(?i:(mum|mom|mother|dad|father|wife|husband|partner|son|"
     r"daughter|brother|sister|nan|nana|gran|grandma|grandad|grandmother|"
-    r"grandfather|friend|dog|cat))\s*,?\s+([A-Z][a-z]{1,20})\b"
+    r"grandfather|friend|dog|cat|puppy|pup|kitten|rabbit|hamster|bird|parrot|"
+    r"horse|pony|tortoise|fish|pet))\s*,?\s+([A-Z][a-z]{1,20})\b"
 )
-NAME_AFTER_CALLED = re.compile(r"\b(?i:called|named)\s+([A-Z][a-z]{1,20})\b")
+# "called Maggie", "named Maggie", "her name was Maggie", "its name is Maggie"
+NAME_AFTER_CALLED = re.compile(
+    r"\b(?i:called|named|name\s+was|name\s+is|name's)\s+([A-Z][a-z]{1,20})\b")
 
 RELATION_CANON = {
     "mum": "mother", "mom": "mother", "mother": "mother",
@@ -776,8 +794,17 @@ RELATION_CANON = {
     "nan": "grandmother", "nana": "grandmother", "gran": "grandmother",
     "grandma": "grandmother", "grandmother": "grandmother",
     "grandad": "grandfather", "grandfather": "grandfather",
-    "friend": "friend", "dog": "dog", "cat": "cat",
+    "friend": "friend",
+    # pets
+    "dog": "dog", "cat": "cat", "puppy": "dog", "pup": "dog", "kitten": "cat",
+    "rabbit": "rabbit", "hamster": "hamster", "bird": "bird", "parrot": "parrot",
+    "horse": "horse", "pony": "pony", "tortoise": "tortoise", "fish": "fish",
+    "pet": "pet",
 }
+
+# Species words used to spot a pet even without a name ("my pet dog died").
+PET_WORDS = ("dog", "cat", "puppy", "pup", "kitten", "rabbit", "hamster",
+             "bird", "parrot", "horse", "pony", "tortoise", "fish", "pet")
 
 FACT_KEYS = {"deceased_name", "relationship", "age", "cause", "time_since_loss",
              "key_dates", "user_name", "support", "helps"}
@@ -825,7 +852,7 @@ def lexical_facts(text: str) -> Dict[str, str]:
 
     if "relationship" not in out:
         for word, canon in RELATION_CANON.items():
-            if re.search(rf"\b(?:my|our)\s+{word}\b", t, re.IGNORECASE):
+            if re.search(rf"\b(?:my|our)\s+(?:pet\s+)?{word}\b", t, re.IGNORECASE):
                 out["relationship"] = canon
                 break
 
