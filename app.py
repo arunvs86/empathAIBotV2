@@ -110,7 +110,26 @@ MAX_HOPS = 2             # supervisor delegation ceiling
 MAX_CRITIQUE_ROUNDS = 1  # rewrite ceiling
 REQUEST_TIMEOUT_S = 30
 
-DB_PATH = HERE / "griefbot_memory.db"
+# Conversation memory must OUTLIVE deploys and restarts. Inside wwwroot the DB
+# is rebuilt on every deploy, wiping everyone's history. On Azure App Service
+# /home is the persistent mount and /home/data sits OUTSIDE wwwroot, so the
+# checkpoint DB survives a redeploy. Override with MEMORY_DB_PATH if needed.
+def _memory_db_path() -> Path:
+    env = os.getenv("MEMORY_DB_PATH")
+    if env:
+        return Path(env)
+    if os.getenv("WEBSITE_SITE_NAME"):        # running on Azure App Service
+        return Path("/home/data/griefbot_memory.db")
+    return HERE / "griefbot_memory.db"
+
+
+DB_PATH = _memory_db_path()
+try:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+except Exception as e:                        # noqa: BLE001
+    log.warning("could not create memory dir %s (%s); using app dir", DB_PATH.parent, e)
+    DB_PATH = HERE / "griefbot_memory.db"
+
 PDF_DIR = HERE / "pdfs"
 
 
